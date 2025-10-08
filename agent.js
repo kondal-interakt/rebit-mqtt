@@ -5,14 +5,14 @@ const WebSocket = require('ws');
 
 // ======= CONFIGURATION =======
 const DEVICE_ID = 'RVM-3101';
-const LOCAL_API_BASE = 'http://localhost:8080';
+const LOCAL_API_BASE = 'http://localhost:8081';
 const WS_URL = 'ws://localhost:8081/websocket/qazwsx1234';
 
 // MQTT Configuration
 const MQTT_BROKER_URL = 'mqtts://mqtt.ceewen.xyz:8883';
 const MQTT_USERNAME = 'mqttuser';
 const MQTT_PASSWORD = 'mqttUser@2025';
-const MQTT_CA_FILE = 'C:\\Users\\govar\\Documents\\Project\\rvm-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
+const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
 
 // ======= WEBSOCKET CONNECTION =======
 let ws = null;
