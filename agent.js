@@ -170,7 +170,7 @@ mqttClient.on('message', async (topic, message) => {
       const result = await axios.post(apiUrl, apiPayload, {
         timeout: 10000,
         headers: {
-          'Content-Type': application/json'
+          'Content-Type': 'application/json'
         }
       });
       
