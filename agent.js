@@ -13,6 +13,11 @@ const MQTT_BROKER_URL = 'mqtts://mqtt.ceewen.xyz:8883';
 const MQTT_USERNAME = 'mqttuser';
 const MQTT_PASSWORD = 'mqttUser@2025';
 const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
+
+// Store moduleId from getModuleId response
+let currentModuleId = null;
+let pendingCommands = new Map();
+
 // ======= WEBSOCKET CONNECTION =======
 let ws = null;
 
@@ -38,6 +43,23 @@ function connectWebSocket() {
         return;
       }
       
+      // Handle getModuleId response (function: "01")
+      if (message.function === '01') {
+        currentModuleId = message.moduleId;
+        console.log(`✅ Module ID received: ${currentModuleId}`);
+        console.log(`📋 Device Serial: ${message.data}`);
+        console.log(`🔌 COM Port: ${message.comId}`);
+        
+        // Check if there's a pending command waiting for moduleId
+        if (pendingCommands.size > 0) {
+          const [commandId, commandData] = Array.from(pendingCommands.entries())[0];
+          console.log(`🔄 Executing pending command: ${commandData.action}`);
+          executePendingCommand(commandData);
+          pendingCommands.delete(commandId);
+        }
+        return;
+      }
+      
       // Publish WebSocket events to MQTT
       const eventTopic = `rvm/${DEVICE_ID}/events`;
       const payload = {
@@ -56,7 +78,7 @@ function connectWebSocket() {
         }
       });
       
-      // Log specific events based on function type
+      // Log specific events
       if (message.function === 'aiPhoto') {
         console.log('🤖 AI Detection Result:', message.data);
       } else if (message.function === 'deviceStatus') {
@@ -87,6 +109,117 @@ function connectWebSocket() {
   });
 }
 
+// ======= GET MODULE ID =======
+async function getModuleId() {
+  try {
+    console.log('🔍 Getting Module ID...');
+    const result = await axios.post(`${LOCAL_API_BASE}/system/serial/getModuleId`, {}, {
+      timeout: 5000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    console.log('📥 getModuleId HTTP Response:', JSON.stringify(result.data, null, 2));
+    console.log('⏳ Waiting for WebSocket response with function: "01"...');
+    
+    return result.data;
+  } catch (err) {
+    console.error('❌ Failed to get module ID:', err.message);
+    throw err;
+  }
+}
+
+// ======= EXECUTE PENDING COMMAND =======
+async function executePendingCommand(commandData) {
+  const { action, originalCommand } = commandData;
+  
+  let apiUrl;
+  let apiPayload;
+  
+  if (!currentModuleId) {
+    console.error('❌ No moduleId available!');
+    return;
+  }
+  
+  if (action === 'openGate') {
+    console.log('🚪 Processing: Open Gate');
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = {
+      moduleId: currentModuleId,  // Use dynamic moduleId from getModuleId
+      motorId: '01',
+      type: '03',
+      deviceType: 1
+    };
+    
+  } else if (action === 'closeGate') {
+    console.log('🚪 Processing: Close Gate');
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = {
+      moduleId: currentModuleId,  // Use dynamic moduleId from getModuleId
+      motorId: '01',
+      type: '00',
+      deviceType: 1
+    };
+  }
+  
+  console.log(`🔗 Calling RVM API: ${apiUrl}`);
+  console.log(`📦 Request payload (with moduleId ${currentModuleId}):`, JSON.stringify(apiPayload, null, 2));
+  
+  try {
+    const result = await axios.post(apiUrl, apiPayload, {
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    console.log(`✅ RVM API Response Status: ${result.status}`);
+    console.log(`📥 RVM API Response:`, JSON.stringify(result.data, null, 2));
+    
+    if (result.status === 200 && result.data.code === 200) {
+      console.log(`✅ ${action} executed successfully`);
+      console.log(`📡 Hardware command: ${result.data.data.cmd}`);
+      
+      // Send success response
+      const responseTopic = `rvm/${DEVICE_ID}/responses`;
+      const responsePayload = {
+        command: action,
+        success: true,
+        result: {
+          status: result.status,
+          code: result.data.code,
+          message: result.data.msg,
+          hardwareCommand: result.data.data.cmd,
+          moduleId: currentModuleId,
+          details: result.data.data.message
+        },
+        timestamp: new Date().toISOString()
+      };
+      
+      mqttClient.publish(responseTopic, JSON.stringify(responsePayload), (err) => {
+        if (err) {
+          console.error('❌ Failed to publish response:', err.message);
+        } else {
+          console.log('📤 Success response published to MQTT');
+        }
+      });
+    }
+    
+  } catch (apiError) {
+    console.error('\n❌ RVM API Call Failed!');
+    console.error(`   Error: ${apiError.message}`);
+    
+    const responseTopic = `rvm/${DEVICE_ID}/responses`;
+    mqttClient.publish(responseTopic, JSON.stringify({
+      command: action,
+      success: false,
+      error: apiError.message,
+      timestamp: new Date().toISOString()
+    }));
+  }
+}
+
 // ======= MQTT CLIENT =======
 const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
   username: MQTT_USERNAME,
@@ -98,7 +231,7 @@ const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
 mqttClient.on('connect', () => {
   console.log('✅ Connected to MQTT Broker');
   
-  // Subscribe to commands for this device
+  // Subscribe to commands
   const commandTopic = `rvm/${DEVICE_ID}/commands`;
   mqttClient.subscribe(commandTopic, (err) => {
     if (!err) {
@@ -111,6 +244,15 @@ mqttClient.on('connect', () => {
   // Start WebSocket connection
   console.log('\n🔌 Starting WebSocket connection...');
   connectWebSocket();
+  
+  // Get moduleId on startup after WebSocket connects
+  setTimeout(async () => {
+    try {
+      await getModuleId();
+    } catch (err) {
+      console.error('⚠️ Failed to get moduleId on startup');
+    }
+  }, 2000); // Wait 2 seconds for WebSocket to connect
 });
 
 // ======= HANDLE MQTT COMMANDS =======
@@ -123,34 +265,8 @@ mqttClient.on('message', async (topic, message) => {
     const command = JSON.parse(message.toString());
     console.log(`📋 Parsed command:`, JSON.stringify(command, null, 2));
     
-    let apiUrl;
-    let apiPayload;
-    
-    if (command.action === 'openGate') {
-      console.log('🚪 Processing: Open Gate');
-      console.log('📖 Doc Reference: Section 5.1 - Gate Motor Open Gate');
-      apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-      apiPayload = {
-        moduleId: '05',
-        motorId: '01',
-        type: '03',
-        deviceType: 1
-      };
-      
-    } else if (command.action === 'closeGate') {
-      console.log('🚪 Processing: Close Gate');
-      console.log('📖 Doc Reference: Section 5.2 - Gate Motor Close Gate');
-      apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-      apiPayload = {
-        moduleId: '05',
-        motorId: '01',
-        type: '00',
-        deviceType: 1
-      };
-      
-    } else {
+    if (command.action !== 'openGate' && command.action !== 'closeGate') {
       console.log('⚠️ Unknown command:', command.action);
-      
       const responseTopic = `rvm/${DEVICE_ID}/responses`;
       mqttClient.publish(responseTopic, JSON.stringify({
         command: command.action,
@@ -162,94 +278,27 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
-    // Make API call to local RVM
-    console.log(`🔗 Calling RVM API: ${apiUrl}`);
-    console.log(`📦 Request payload:`, JSON.stringify(apiPayload, null, 2));
-    
-    try {
-      const result = await axios.post(apiUrl, apiPayload, {
-        timeout: 10000,
-        headers: {
-          'Content-Type': 'application/json'
-        }
+    // Check if we have moduleId
+    if (!currentModuleId) {
+      console.log('⚠️ No moduleId yet, fetching it first...');
+      
+      // Store command as pending
+      const commandId = Date.now().toString();
+      pendingCommands.set(commandId, {
+        action: command.action,
+        originalCommand: command
       });
       
-      console.log(`✅ RVM API Response Status: ${result.status}`);
-      console.log(`📥 RVM API Response:`, JSON.stringify(result.data, null, 2));
+      // Get moduleId (will trigger command execution via WebSocket response)
+      await getModuleId();
       
-      // Check if response indicates success
-      if (result.status === 200 && result.data.code === 200) {
-        console.log(`✅ ${command.action} executed successfully`);
-        console.log(`📡 Hardware command: ${result.data.data.cmd}`);
-        
-        // Send success response immediately (don't wait for WebSocket)
-        const responseTopic = `rvm/${DEVICE_ID}/responses`;
-        const responsePayload = {
-          command: command.action,
-          success: true,
-          result: {
-            status: result.status,
-            code: result.data.code,
-            message: result.data.msg,
-            hardwareCommand: result.data.data.cmd,
-            details: result.data.data.message
-          },
-          timestamp: new Date().toISOString()
-        };
-        
-        mqttClient.publish(responseTopic, JSON.stringify(responsePayload), (err) => {
-          if (err) {
-            console.error('❌ Failed to publish response:', err.message);
-          } else {
-            console.log('📤 Success response published to MQTT');
-          }
-        });
-        
-      } else {
-        console.log('⚠️ Unexpected response format');
-        
-        const responseTopic = `rvm/${DEVICE_ID}/responses`;
-        mqttClient.publish(responseTopic, JSON.stringify({
-          command: command.action,
-          success: false,
-          error: 'Unexpected API response',
-          result: result.data,
-          timestamp: new Date().toISOString()
-        }));
-      }
-      
-    } catch (apiError) {
-      console.error('\n❌ RVM API Call Failed!');
-      console.error(`   Error Type: ${apiError.code || 'Unknown'}`);
-      console.error(`   Error Message: ${apiError.message}`);
-      
-      if (apiError.response) {
-        console.error(`   HTTP Status: ${apiError.response.status}`);
-        console.error(`   Response Data:`, apiError.response.data);
-      } else if (apiError.request) {
-        console.error('   ⚠️ No response received from RVM API');
-        console.error('   Possible reasons:');
-        console.error('   1. RVM middleware is not running on port 8081');
-        console.error('   2. Incorrect URL or endpoint');
-        console.error('   3. Firewall blocking the connection');
-      }
-      
-      // Send error response
-      const responseTopic = `rvm/${DEVICE_ID}/responses`;
-      mqttClient.publish(responseTopic, JSON.stringify({
-        command: command.action,
-        success: false,
-        error: apiError.message,
-        errorDetails: {
-          code: apiError.code,
-          syscall: apiError.syscall,
-          address: apiError.address,
-          port: apiError.port
-        },
-        timestamp: new Date().toISOString()
-      }));
-      
-      console.log('📤 Error response published to MQTT');
+    } else {
+      // We have moduleId, execute immediately
+      console.log(`✅ Using cached moduleId: ${currentModuleId}`);
+      await executePendingCommand({
+        action: command.action,
+        originalCommand: command
+      });
     }
     
   } catch (err) {
@@ -283,8 +332,9 @@ console.log(`   - HTTP API: ${LOCAL_API_BASE}`);
 console.log(`   - WebSocket: ${WS_URL}`);
 console.log(`🔗 MQTT Broker: ${MQTT_BROKER_URL}`);
 console.log('========================================');
-console.log('\n📖 Operation Mode:');
-console.log('   - Commands sent via HTTP API');
-console.log('   - Success response sent immediately when API returns 200');
-console.log('   - WebSocket monitors for events (AI, weight, bin status, etc)');
+console.log('\n📖 Operation Flow:');
+console.log('   1. Call getModuleId API');
+console.log('   2. Receive moduleId via WebSocket (function: "01")');
+console.log('   3. Use moduleId in motor commands');
+console.log('   4. WebSocket monitors for events');
 console.log('========================================\n');
