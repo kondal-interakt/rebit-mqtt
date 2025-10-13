@@ -28,7 +28,8 @@ let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
 
-// NO MORE PROMISE WAITING - responses handled immediately!
+// Response handling - NO MORE TIMEOUTS!
+const responseCache = new Map();  // Cache responses by type
 let ws = null;
 
 // ======= WEBSOCKET =======
@@ -44,7 +45,9 @@ function connectWebSocket() {
   ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
-      console.log(`📨 WS [${message.function || 'msg'}]`);
+      
+      // Log ALL WebSocket messages for debugging
+      console.log(`📨 WS [${message.function}]:`, typeof message.data === 'string' && message.data.length > 100 ? message.data.substring(0, 100) + '...' : message.data);
       
       if (message.msg === '连接成功' || message.msg === 'connection successful') {
         console.log('✅ Connection confirmed');
@@ -81,6 +84,9 @@ function connectWebSocket() {
         console.log(`   Match: ${latestAIResult.matchRate}%`);
         console.log(`   Material: ${latestAIResult.materialType}`);
         
+        // Cache for immediate retrieval
+        responseCache.set('aiPhoto', { data: latestAIResult, timestamp: Date.now() });
+        
         mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
         
         // Auto-trigger weight if enabled
@@ -93,12 +99,18 @@ function connectWebSocket() {
       
       // Weight Result - IMMEDIATE RESPONSE
       if (message.function === '06') {
+        const weightValue = parseFloat(message.data) || 0;
+        
         latestWeight = {
-          weight: parseFloat(message.data) || 0,
+          weight: weightValue,
           timestamp: new Date().toISOString()
         };
         
         console.log(`⚖️ Weight: ${latestWeight.weight}g`);
+        console.log(`   Raw data: ${message.data}`);
+        
+        // Cache for immediate retrieval
+        responseCache.set('weight', { data: latestWeight, timestamp: Date.now() });
         
         mqttClient.publish(`rvm/${DEVICE_ID}/weight_result`, JSON.stringify(latestWeight));
         
@@ -182,37 +194,59 @@ function connectWebSocket() {
 
 // ======= AUTO-RECOVERY =======
 async function autoRecoverMotors(abnormals) {
-  if (recoveryInProgress) return;
+  if (recoveryInProgress) {
+    console.log('⏳ Recovery already in progress, skipping...');
+    return;
+  }
   recoveryInProgress = true;
   
   console.log('🔧 AUTO-RECOVERY: Starting...');
   
   for (const motor of abnormals) {
     try {
-      console.log(`🔧 Recovering ${motor.motorTypeDesc}...`);
+      console.log(`🔧 Recovering ${motor.motorTypeDesc} (Motor ${motor.motorType})...`);
       
       switch (motor.motorType) {
-        case '01': await executeCommand({ action: 'closeGate' }); await delay(1000); break;
-        case '02': await executeCommand({ action: 'transferStop' }); await delay(500); break;
-        case '03': await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } }); await delay(500); break;
-        case '04': await executeCommand({ action: 'compactorStop' }); await delay(500); break;
+        case '01': 
+          await executeCommand({ action: 'closeGate' });
+          await delay(1000);
+          break;
+        case '02': 
+          await executeCommand({ action: 'transferStop' });
+          await delay(500);
+          break;
+        case '03': 
+          await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+          await delay(500);
+          break;
+        case '04': 
+          await executeCommand({ action: 'compactorStop' });
+          await delay(500);
+          break;
         case '05':
-          console.log('🔧 Resetting stepper to home...');
+          console.log('🔧 Stepper motor abnormal - attempting extended reset...');
+          // Try position 01 first, then back to 00
+          await executeCommand({ action: 'stepperMotor', params: { position: '01' } });
+          await delay(3000);
           await executeCommand({ action: 'stepperMotor', params: { position: '00' } });
-          await delay(2000);
+          await delay(3000);
+          console.log('✅ Stepper reset sequence complete');
           break;
       }
       
-      console.log(`✅ Recovery done: ${motor.motorTypeDesc}`);
+      console.log(`✅ Recovery attempt done: ${motor.motorTypeDesc}`);
     } catch (err) {
       console.error(`❌ Recovery failed: ${err.message}`);
     }
   }
   
+  // Don't spam recovery - wait 30 seconds before allowing another recovery
   setTimeout(() => {
     recoveryInProgress = false;
-    console.log('✅ Recovery completed');
-  }, 3000);
+    console.log('✅ Recovery cooldown complete - ready for next recovery if needed');
+  }, 30000);  // 30 second cooldown
+  
+  console.log('🔧 Recovery sequence finished (30s cooldown active)');
 }
 
 // ======= FULL CYCLE =======
@@ -330,16 +364,16 @@ async function executeCommand(commandData) {
     apiPayload = { moduleId: currentModuleId, motorId: '04', type: '00', deviceType };
   } else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
-    apiPayload = { moduleId: '06', type: '00' };
+    apiPayload = { moduleId: currentModuleId, type: '00' };  // Use actual moduleId
   } else if (action === 'calibrateWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/weightCalibration`;
-    apiPayload = { moduleId: '07', type: '00' };
+    apiPayload = { moduleId: currentModuleId, type: '00' };  // Use actual moduleId
   } else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
   } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    apiPayload = { moduleId: '0F', type: params?.position || '00', deviceType };
+    apiPayload = { moduleId: currentModuleId, type: params?.position || '00', deviceType };  // Use actual moduleId
   } else if (action === 'customMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = {
@@ -357,7 +391,7 @@ async function executeCommand(commandData) {
   
   try {
     // Just call API - responses come via WebSocket immediately!
-    await axios.post(apiUrl, apiPayload, {
+    const result = await axios.post(apiUrl, apiPayload, {
       timeout: 10000,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -366,9 +400,16 @@ async function executeCommand(commandData) {
     
     // For non-motor commands, wait a bit for WebSocket response
     if (action === 'takePhoto') {
+      console.log('⏳ Waiting 2s for AI processing...');
       await delay(2000);
     } else if (action === 'getWeight') {
+      console.log('⏳ Waiting 3s for weight reading...');
       await delay(3000);
+      
+      // Check if we got weight response
+      if (!responseCache.has('weight') || (Date.now() - responseCache.get('weight').timestamp > 5000)) {
+        console.log('⚠️ No weight response received - may need to check scale connection');
+      }
     }
     
     mqttClient.publish(`rvm/${DEVICE_ID}/responses`, JSON.stringify({
