@@ -1,3 +1,6 @@
+// Full RVM Agent Code (agent.js - Runs on RVM Machine)
+// Plain JS version - No TypeScript annotations
+
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -32,6 +35,7 @@ function connectWebSocket() {
     console.log('✅ WebSocket connected to RVM');
   });
   
+  // FIXED: Mark callback as async to allow awaits inside
   ws.on('message', async (data) => {
     try {
       console.log('\n📩 WebSocket message:', data.toString());
@@ -50,7 +54,7 @@ function connectWebSocket() {
         
         if (pendingCommands.size > 0) {
           const [commandId, commandData] = Array.from(pendingCommands.entries())[0];
-          executePendingCommand(commandData);
+          await executePendingCommand(commandData);  // Now awaited in async context
           pendingCommands.delete(commandId);
         }
         return;
@@ -178,7 +182,7 @@ function connectWebSocket() {
             }
           ];
           
-          // Execute the full sequence
+          // Execute the full sequence (now awaited in async context)
           await executePendingCommand({
             action: 'multipleMotors',
             params: {
