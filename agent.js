@@ -28,6 +28,13 @@ let recoveryInProgress = false;  // Prevent recovery loops
 // Response waiting mechanism
 const commandPromises = new Map();
 
+// Cache for responses that arrived before promise was registered
+const responseCache = {
+  lastAIPhoto: null,
+  lastWeight: null,
+  timestamp: null
+};
+
 // Auto-cycle state tracking
 let autoCycleEnabled = false;
 let cycleInProgress = false;
