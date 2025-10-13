@@ -1,5 +1,12 @@
 // Full RVM Agent Code (agent.js - Runs on RVM Machine)
 // Plain JS version - No TypeScript annotations
+// Updated: Aligned with official RVM-3101 spec (v1.0.2).
+// - Fetched currentModuleId from /system/serial/getModuleId API (WS function "01", data as module ID).
+// - Use currentModuleId dynamically for motor-related actions (e.g., motorSelect, stepMotorSelect) instead of hardcoding.
+// - For specialized modules like weight ('06'), calibration ('07'), keep as per spec since they are component-specific.
+// - deviceType set to '1' for RVM-3101 as per section 11.
+// - Retained WS handlers for "03" (abnormal), "deviceStatus" (bin full).
+// - Auto-calibrate if weight <=0.
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -17,11 +24,14 @@ const MQTT_USERNAME = 'mqttuser';
 const MQTT_PASSWORD = 'mqttUser@2025';
 const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
 
-// Store moduleId and latest AI detection result
-let currentModuleId = null;
+// Store moduleId from API and latest results
+let currentModuleId = null;  // Fetched dynamically from getModuleId
 let latestAIResult = null;
 let latestWeight = null;
 let pendingCommands = new Map();
+
+// Response waiting mechanism
+const commandPromises = new Map();
 
 // ======= WEBSOCKET CONNECTION =======
 let ws = null;
@@ -35,13 +45,11 @@ function connectWebSocket() {
     console.log('✅ WebSocket connected to RVM');
   });
   
-  // FIXED: Mark callback as async to allow awaits inside
   ws.on('message', async (data) => {
     try {
       console.log('\n📩 WebSocket message:', data.toString());
       const message = JSON.parse(data);
       
-      // Skip connection success message
       if (message.msg === '连接成功' || message.msg === 'connection successful') {
         console.log('✅ WebSocket connection confirmed');
         return;
@@ -49,12 +57,17 @@ function connectWebSocket() {
       
       // Handle getModuleId response (function: "01")
       if (message.function === '01') {
-        currentModuleId = message.data;  // Fixed: use message.data per doc
+        currentModuleId = message.data;  // Dynamic module ID from API
         console.log(`✅ Module ID: ${currentModuleId}`);
+        
+        if (commandPromises.has('getModuleId')) {
+          commandPromises.get('getModuleId').resolve(message);
+          commandPromises.delete('getModuleId');
+        }
         
         if (pendingCommands.size > 0) {
           const [commandId, commandData] = Array.from(pendingCommands.entries())[0];
-          await executePendingCommand(commandData);  // Now awaited in async context
+          await executeCommand(commandData);
           pendingCommands.delete(commandId);
         }
         return;
@@ -63,13 +76,12 @@ function connectWebSocket() {
       // Handle AI Photo Result (function: "aiPhoto")
       if (message.function === 'aiPhoto') {
         try {
-          // Parse the nested JSON in the 'data' field
           const aiData = JSON.parse(message.data);
           const probability = aiData.probability || 0;
           const className = aiData.className || '';
           
           latestAIResult = {
-            matchRate: Math.round(probability * 100),  // Convert to percentage
+            matchRate: Math.round(probability * 100),
             materialType: determineMaterialType(aiData),
             className: className,
             taskId: aiData.taskId,
@@ -82,17 +94,19 @@ function connectWebSocket() {
           console.log(`   Class Name: ${latestAIResult.className}`);
           console.log(`   Material: ${latestAIResult.materialType}`);
           
-          // AUTOMATION: If match rate >= 30% and material identified, auto-proceed
+          const photoCommandId = message.taskId || 'aiPhoto';
+          if (commandPromises.has(photoCommandId)) {
+            commandPromises.get(photoCommandId).resolve(message);
+            commandPromises.delete(photoCommandId);
+          }
+          
           if (latestAIResult.matchRate >= 30 && latestAIResult.materialType !== 'UNKNOWN') {
             console.log(`🤖 Auto-triggering workflow for ${latestAIResult.materialType}`);
-            
-            // Step 1: Get weight automatically
             setTimeout(async () => {
-              await executePendingCommand({ action: 'getWeight' });
-            }, 500);  // Short delay for stability
+              await executeCommand({ action: 'getWeight' });
+            }, 500);
           } else {
-            console.log(`⚠️ AI confidence too low (${latestAIResult.matchRate}%) or unknown material - manual intervention needed`);
-            // Optionally publish to MQTT for user alert
+            console.log(`⚠️ AI confidence too low (${latestAIResult.matchRate}%) or unknown material`);
             mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
               type: 'low_confidence',
               message: `AI match rate: ${latestAIResult.matchRate}%, Material: ${latestAIResult.materialType}`,
@@ -100,12 +114,10 @@ function connectWebSocket() {
             }));
           }
           
-          // Publish AI result to MQTT
           const aiTopic = `rvm/${DEVICE_ID}/ai_result`;
           mqttClient.publish(aiTopic, JSON.stringify(latestAIResult));
         } catch (parseErr) {
           console.error('❌ Failed to parse AI data:', parseErr.message);
-          // Fallback: treat as low confidence unknown
           latestAIResult = {
             matchRate: 0,
             materialType: 'UNKNOWN',
@@ -113,7 +125,6 @@ function connectWebSocket() {
             rawData: message,
             timestamp: new Date().toISOString()
           };
-          // Publish fallback
           const aiTopic = `rvm/${DEVICE_ID}/ai_result`;
           mqttClient.publish(aiTopic, JSON.stringify(latestAIResult));
         }
@@ -129,11 +140,26 @@ function connectWebSocket() {
         
         console.log(`⚖️ Weight: ${latestWeight.weight}g`);
         
-        // Publish weight to MQTT
+        if (commandPromises.has('getWeight')) {
+          commandPromises.get('getWeight').resolve(message);
+          commandPromises.delete('getWeight');
+        }
+        
+        // Auto-calibrate if invalid (per spec)
+        if (latestWeight.weight <= 0) {
+          console.log(`⚠️ Invalid weight (${latestWeight.weight}g) - auto-calibrating...`);
+          setTimeout(async () => {
+            await executeCommand({ action: 'calibrateWeight' });
+            setTimeout(async () => {
+              await executeCommand({ action: 'getWeight' });
+            }, 1000);
+          }, 500);
+        }
+        
         const weightTopic = `rvm/${DEVICE_ID}/weight_result`;
         mqttClient.publish(weightTopic, JSON.stringify(latestWeight));
         
-        // AUTOMATION: If valid, trigger sequenced motors via testAllMotor
+        // Automation
         if (latestAIResult && latestWeight.weight > 50) {
           console.log(`✅ Valid weight detected - triggering sequenced operations`);
           
@@ -149,64 +175,85 @@ function connectWebSocket() {
               stepperPosition = '01';
           }
           
-          // Define sequence: Stepper → Transfer → Compact Start (5s run) → Compact Stop → Close Gate
           const motorSequence = [
-            {
-              moduleId: '0F',      // Stepper module
-              type: stepperPosition,
-              time: 2000           // Wait 2s after stepper positions
+            { action: 'stepperMotor', params: { position: stepperPosition } },
+            { 
+              action: 'customMotor', 
+              params: { 
+                motorId: latestAIResult.materialType === 'PLASTIC_BOTTLE' ? '03' : '02', 
+                type: '03' 
+              } 
             },
-            {
-              moduleId: currentModuleId,
-              motorId: latestAIResult.materialType === 'PLASTIC_BOTTLE' ? '03' : '02',
-              type: '03',          // To bin or forward
-              time: 3000           // Wait 3s for transfer
-            },
-            {
-              moduleId: currentModuleId,
-              motorId: '04',       // Compactor
-              type: '01',          // Start
-              time: 5000           // Run for 5s, then next auto-stops
-            },
-            {
-              moduleId: currentModuleId,
-              motorId: '04',
-              type: '00',          // Stop
-              time: 1000           // 1s pause
-            },
-            {
-              moduleId: currentModuleId,
-              motorId: '01',       // Gate
-              type: '00',          // Close
-              time: 0              // End sequence
-            }
+            { action: 'compactorStart' },
+            { delay: 5000 },
+            { action: 'compactorStop' },
+            { action: 'closeGate' }
           ];
           
-          // Execute the full sequence (now awaited in async context)
-          await executePendingCommand({
-            action: 'multipleMotors',
-            params: {
-              initialDelay: 1000,    // 1s before starting
-              motorActions: motorSequence
-            }
-          });
+          await executeSequence(motorSequence);
           
-          console.log('🏁 Sequenced operations dispatched');
-          // Publish completion (monitor WebSocket for final events)
+          console.log('🏁 Sequenced operations completed');
           mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
             material: latestAIResult.materialType,
             weight: latestWeight.weight,
-            sequence: 'testAllMotor',
+            sequence: 'cycle',
             timestamp: new Date().toISOString()
           }));
           
-        } else if (latestWeight.weight <= 50) {
+        } else if (latestWeight.weight <= 50 && latestWeight.weight > 0) {
           console.log(`⚠️ Weight too low (${latestWeight.weight}g) - rejecting item`);
-          // Optional: Alert or reverse
+          mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
+            type: 'low_weight',
+            message: `Weight: ${latestWeight.weight}g`,
+            timestamp: new Date().toISOString()
+          }));
+        }
+        return;
+      }
+      
+      // Handle Abnormal (function: "03")
+      if (message.function === '03') {
+        console.log('🚨 RVM Abnormal Detected:', message.data);
+        mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
+          type: 'abnormal',
+          motors: message.data,
+          timestamp: new Date().toISOString()
+        }));
+        return;
+      }
+      
+      // Handle Device Status (function: "deviceStatus")
+      if (message.function === 'deviceStatus') {
+        const fullCode = parseInt(message.data) || -1;
+        const binStatus = [
+          'Left bin (PET) full',
+          'Middle bin (Metal can) full',
+          'Right bin full',
+          'Glass bin full',
+          'Infrared body sensor'
+        ];
+        if (fullCode >= 0 && fullCode <= 3) {
+          console.log(`🗑️ Bin full: ${binStatus[fullCode]}`);
+          mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
+            type: 'bin_full',
+            code: fullCode,
+            description: binStatus[fullCode],
+            timestamp: new Date().toISOString()
+          }));
+        }
+        return;
+      }
+      
+      // Generic motor response
+      if (message.function === 'motor' || message.function?.startsWith('motor')) {
+        const commandId = message.commandId || message.data?.commandId || 'motor';
+        if (commandPromises.has(commandId)) {
+          commandPromises.get(commandId).resolve(message);
+          commandPromises.delete(commandId);
         }
       }
       
-      // Publish all WebSocket events to MQTT
+      // Publish events
       const eventTopic = `rvm/${DEVICE_ID}/events`;
       mqttClient.publish(eventTopic, JSON.stringify({
         deviceId: DEVICE_ID,
@@ -231,13 +278,12 @@ function connectWebSocket() {
   });
 }
 
-// ======= DETERMINE MATERIAL TYPE FROM AI RESULT =======
+// ======= DETERMINE MATERIAL TYPE =======
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
   const probability = aiData.probability || 0;
   const matchRate = Math.round(probability * 100);
   
-  // Classify based on className keywords (adjust as needed for your AI model)
   if (className.includes('pet瓶') || className.includes('plastic') || className.includes('瓶')) {
     return 'PLASTIC_BOTTLE';
   } else if (className.includes('易拉罐') || className.includes('metal') || className.includes('can') || className.includes('铝')) {
@@ -246,27 +292,45 @@ function determineMaterialType(aiData) {
     return 'GLASS';
   }
   
-  // If no specific match, use probability threshold for default
-  if (matchRate >= 50) {  // Threshold for sensitivity
+  if (matchRate >= 50) {
     if (className.includes('瓶') || className.includes('bottle')) {
       return 'PLASTIC_BOTTLE';
     } else {
-      return 'METAL_CAN';  // Default for cans
+      return 'METAL_CAN';
     }
   }
   
   return 'UNKNOWN';
 }
 
-// ======= GET MODULE ID =======
+// ======= WAIT FOR RESPONSE =======
+function waitForResponse(commandId, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    commandPromises.set(commandId, { resolve, reject });
+    
+    setTimeout(() => {
+      if (commandPromises.has(commandId)) {
+        commandPromises.get(commandId).reject(new Error(`Timeout waiting for ${commandId}`));
+        commandPromises.delete(commandId);
+      }
+    }, timeout);
+  });
+}
+
+// ======= GET MODULE ID FROM API =======
 async function getModuleId() {
   try {
-    console.log('🔍 Getting Module ID...');
+    console.log('🔍 Getting Module ID from API...');
+    const commandId = 'getModuleId';
     await axios.post(`${LOCAL_API_BASE}/system/serial/getModuleId`, {}, {
       timeout: 5000,
       headers: { 'Content-Type': 'application/json' }
     });
     console.log('⏳ Waiting for WebSocket response...');
+    
+    const response = await waitForResponse(commandId);
+    console.log('✅ Module ID received:', currentModuleId);
+    return currentModuleId;
   } catch (err) {
     console.error('❌ Failed to get module ID:', err.message);
     throw err;
@@ -274,8 +338,10 @@ async function getModuleId() {
 }
 
 // ======= EXECUTE COMMAND =======
-async function executePendingCommand(commandData) {
+async function executeCommand(commandData) {
   const { action, params } = commandData;
+  const commandId = params?.commandId || `${action}-${Date.now()}`;
+  const deviceType = 1;  // Fixed for RVM-3101 per spec section 11
   
   if (!currentModuleId && action !== 'getModuleId') {
     console.error('❌ No moduleId available!');
@@ -283,76 +349,62 @@ async function executePendingCommand(commandData) {
   }
   
   let apiUrl;
-  let apiPayload;
+  let apiPayload = { ...params, commandId };
   
-  console.log(`🔄 Processing: ${action}`);
+  console.log(`🔄 Processing: ${action} (ID: ${commandId})`);
   
-  // Motor control commands
+  // Use dynamic currentModuleId for motor actions
   if (action === 'openGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType: 1 };
-  } 
-  else if (action === 'closeGate') {
+    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType };
+  } else if (action === 'closeGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType: 1 };
-  }
-  else if (action === 'transferForward') {
+    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType };
+  } else if (action === 'transferForward') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '02', deviceType: 1 };
-  }
-  else if (action === 'transferReverse') {
+    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '02', deviceType };
+  } else if (action === 'transferReverse') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '01', deviceType: 1 };
-  }
-  else if (action === 'transferStop') {
+    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '01', deviceType };
+  } else if (action === 'transferStop') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '00', deviceType: 1 };
-  }
-  else if (action === 'transferToCollectBin') {
+    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '00', deviceType };
+  } else if (action === 'transferToCollectBin') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '03', type: '03', deviceType: 1 };
-  }
-  else if (action === 'compactorStart') {
+    apiPayload = { moduleId: currentModuleId, motorId: '03', type: '03', deviceType };
+  } else if (action === 'compactorStart') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '01', deviceType: 1 };
-  }
-  else if (action === 'compactorStop') {
+    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '01', deviceType };
+  } else if (action === 'compactorStop') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '00', deviceType: 1 };
-  }
-  else if (action === 'getWeight') {
+    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '00', deviceType };
+  } else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
-    apiPayload = { moduleId: '06', type: '00' };
-  }
-  else if (action === 'calibrateWeight') {
+    apiPayload = { moduleId: '06', type: '00' };  // Fixed per spec section 5.9
+  } else if (action === 'calibrateWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/weightCalibration`;
-    apiPayload = { moduleId: '07', type: '00' };
-  }
-  else if (action === 'takePhoto') {
+    apiPayload = { moduleId: '07', type: '00' };  // Fixed per spec section 5.10
+  } else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
-  }
-  else if (action === 'stepperMotor') {
+  } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    apiPayload = { moduleId: '0F', type: params?.position || '00', deviceType: 1 };
-  }
-  else if (action === 'multipleMotors') {
+    apiPayload = { moduleId: '0F', type: params?.position || '00', deviceType };  // Fixed '0F' per spec section 5.13
+  } else if (action === 'multipleMotors') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/testAllMotor`;
     apiPayload = {
       time: params?.initialDelay || 1000,
-      list: params?.motorActions || []
+      list: params?.motorActions.map(m => ({ ...m, moduleId: currentModuleId })) || []  // Use dynamic for list
     };
-  }
-  else if (action === 'customMotor') {
+  } else if (action === 'customMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = {
       moduleId: params?.moduleId || currentModuleId,
       motorId: params?.motorId,
       type: params?.type,
-      deviceType: params?.deviceType || 1
+      deviceType
     };
-  }
-  else {
+  } else {
     console.error('⚠️ Unknown action:', action);
     return;
   }
@@ -366,18 +418,25 @@ async function executePendingCommand(commandData) {
       headers: { 'Content-Type': 'application/json' }
     });
     
-    console.log(`✅ Success: ${result.status}`);
+    console.log(`✅ API Success: ${result.status}`);
     
-    // Include AI and weight data in response if available
+    let wsResponse;
+    if (action !== 'getModuleId') {
+      wsResponse = await waitForResponse(commandId);
+      console.log(`✅ WebSocket response for ${action}:`, wsResponse.data || wsResponse);
+    }
+    
     const responseData = {
       command: action,
+      commandId,
       success: true,
-      result: result.data,
+      apiResult: result.data,
+      wsResponse: wsResponse?.data || wsResponse,
       moduleId: currentModuleId,
       timestamp: new Date().toISOString()
     };
     
-    if (action === 'stepperMotor') {
+    if (['stepperMotor', 'transferForward', 'transferReverse', 'transferStop', 'transferToCollectBin', 'compactorStart', 'compactorStop', 'openGate', 'closeGate'].includes(action)) {
       responseData.aiResult = latestAIResult;
     }
     
@@ -394,11 +453,31 @@ async function executePendingCommand(commandData) {
     const responseTopic = `rvm/${DEVICE_ID}/responses`;
     mqttClient.publish(responseTopic, JSON.stringify({
       command: action,
+      commandId,
       success: false,
       error: apiError.message,
       timestamp: new Date().toISOString()
     }));
   }
+}
+
+// ======= EXECUTE SEQUENTIAL COMMANDS =======
+async function executeSequence(sequence) {
+  for (let step of sequence) {
+    if (step.delay) {
+      console.log(`⏳ Delaying ${step.delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, step.delay));
+    } else if (step.action) {
+      console.log(`🔄 Executing step: ${step.action}`);
+      await executeCommand(step);
+    }
+  }
+}
+
+// ======= HANDLE CYCLE START =======
+async function handleCycleStart() {
+  console.log('🚀 Starting RVM Cycle');
+  await executeCommand({ action: 'takePhoto' });
 }
 
 // ======= MQTT CLIENT =======
@@ -423,17 +502,22 @@ mqttClient.on('connect', () => {
       await getModuleId();
     } catch (err) {
       console.error('⚠️ Failed to get moduleId on startup');
+      setTimeout(() => getModuleId(), 5000);
     }
   }, 2000);
 });
 
-// ======= HANDLE MQTT COMMANDS =======
 mqttClient.on('message', async (topic, message) => {
   console.log('\n========================================');
   console.log(`📩 Command: ${message.toString()}`);
   
   try {
     const command = JSON.parse(message.toString());
+    
+    if (command.action === 'cycle/start') {
+      await handleCycleStart();
+      return;
+    }
     
     if (!currentModuleId) {
       console.log('⚠️ No moduleId, fetching first...');
@@ -442,7 +526,7 @@ mqttClient.on('message', async (topic, message) => {
       await getModuleId();
     } else {
       console.log(`✅ Using moduleId: ${currentModuleId}`);
-      await executePendingCommand(command);
+      await executeCommand(command);
     }
     
   } catch (err) {
