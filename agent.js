@@ -614,6 +614,15 @@ mqttClient.on('message', async (topic, message) => {
       autoCycleEnabled = payload.enabled === true;
       console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ENABLED' : 'DISABLED'}`);
       
+      // Auto-open gate when enabling auto mode
+      if (autoCycleEnabled && currentModuleId) {
+        console.log('🚪 AUTO: Opening gate for item acceptance');
+        await executeCommand({ action: 'openGate' });
+      } else if (!autoCycleEnabled && currentModuleId) {
+        console.log('🚪 AUTO: Closing gate - auto mode disabled');
+        await executeCommand({ action: 'closeGate' });
+      }
+      
       mqttClient.publish(`rvm/${DEVICE_ID}/status`, JSON.stringify({
         autoMode: autoCycleEnabled,
         cycleInProgress,
