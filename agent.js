@@ -14,8 +14,10 @@ const MQTT_USERNAME = 'mqttuser';
 const MQTT_PASSWORD = 'mqttUser@2025';
 const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
 
-// Store moduleId from getModuleId response
+// Store moduleId and latest AI detection result
 let currentModuleId = null;
+let latestAIResult = null;
+let latestWeight = null;
 let pendingCommands = new Map();
 
 // ======= WEBSOCKET CONNECTION =======
@@ -32,6 +34,7 @@ function connectWebSocket() {
   
   ws.on('message', (data) => {
     try {
+      console.log('\n📩 WebSocket message:', data.toString());
       const message = JSON.parse(data);
       
       // Skip connection success message
@@ -43,15 +46,47 @@ function connectWebSocket() {
       // Handle getModuleId response (function: "01")
       if (message.function === '01') {
         currentModuleId = message.moduleId;
-        console.log(`✅ Module ID received: ${currentModuleId}`);
+        console.log(`✅ Module ID: ${currentModuleId}`);
         
-        // Execute pending command if any
         if (pendingCommands.size > 0) {
           const [commandId, commandData] = Array.from(pendingCommands.entries())[0];
           executePendingCommand(commandData);
           pendingCommands.delete(commandId);
         }
         return;
+      }
+      
+      // Handle AI Photo Result (function: "aiPhoto")
+      if (message.function === 'aiPhoto') {
+        latestAIResult = {
+          matchRate: message.data,
+          materialType: determineMaterialType(message),
+          rawData: message,
+          timestamp: new Date().toISOString()
+        };
+        
+        console.log('🤖 AI Detection Result:');
+        console.log(`   Match Rate: ${latestAIResult.matchRate}%`);
+        console.log(`   Material: ${latestAIResult.materialType}`);
+        console.log(`   Raw Data: ${JSON.stringify(message)}`);
+        
+        // Publish AI result to MQTT
+        const aiTopic = `rvm/${DEVICE_ID}/ai_result`;
+        mqttClient.publish(aiTopic, JSON.stringify(latestAIResult));
+      }
+      
+      // Handle Weight Result (function: "06")
+      if (message.function === '06') {
+        latestWeight = {
+          weight: parseFloat(message.data) || 0,
+          timestamp: new Date().toISOString()
+        };
+        
+        console.log(`⚖️ Weight: ${latestWeight.weight}g`);
+        
+        // Publish weight to MQTT
+        const weightTopic = `rvm/${DEVICE_ID}/weight_result`;
+        mqttClient.publish(weightTopic, JSON.stringify(latestWeight));
       }
       
       // Publish all WebSocket events to MQTT
@@ -77,6 +112,38 @@ function connectWebSocket() {
   ws.on('error', (err) => {
     console.error('❌ WebSocket error:', err.message);
   });
+}
+
+// ======= DETERMINE MATERIAL TYPE FROM AI RESULT =======
+function determineMaterialType(aiMessage) {
+  // This function interprets the AI result to determine material type
+  // You may need to adjust this based on actual AI response format
+  
+  const matchRate = parseInt(aiMessage.data) || 0;
+  
+  // Check if there's additional data in the message
+  if (aiMessage.materialType) {
+    return aiMessage.materialType;
+  }
+  
+  // If match rate is high enough, try to determine from other fields
+  if (matchRate >= 70) {
+    // Check for material indicators in the raw data
+    const rawData = JSON.stringify(aiMessage).toLowerCase();
+    
+    if (rawData.includes('pet') || rawData.includes('plastic') || rawData.includes('bottle')) {
+      return 'PLASTIC_BOTTLE';
+    } else if (rawData.includes('metal') || rawData.includes('can') || rawData.includes('aluminum')) {
+      return 'METAL_CAN';
+    }
+  }
+  
+  // Default: if match rate is high, assume plastic, otherwise unknown
+  if (matchRate >= 70) {
+    return 'PLASTIC_BOTTLE';  // Default assumption
+  } else {
+    return 'UNKNOWN';
+  }
 }
 
 // ======= GET MODULE ID =======
@@ -108,8 +175,32 @@ async function executePendingCommand(commandData) {
   
   console.log(`🔄 Processing: ${action}`);
   
+  // Special handling for auto-stepper (uses latest AI result)
+  if (action === 'stepperAuto') {
+    if (!latestAIResult) {
+      console.error('❌ No AI result available for auto stepper positioning');
+      return;
+    }
+    
+    let stepperPosition;
+    switch (latestAIResult.materialType) {
+      case 'PLASTIC_BOTTLE':
+        stepperPosition = '03';  // Position for plastic bottle
+        break;
+      case 'METAL_CAN':
+        stepperPosition = '02';  // Position for metal can
+        break;
+      default:
+        stepperPosition = '01';  // Return to origin for unknown
+    }
+    
+    console.log(`🎯 Auto-positioning stepper to: ${stepperPosition} (${latestAIResult.materialType})`);
+    
+    apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
+    apiPayload = { moduleId: '0F', type: stepperPosition, deviceType: 1 };
+  }
   // Motor control commands
-  if (action === 'openGate') {
+  else if (action === 'openGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType: 1 };
   } 
@@ -117,7 +208,6 @@ async function executePendingCommand(commandData) {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType: 1 };
   }
-  // Transfer Motor (5.3-5.6)
   else if (action === 'transferForward') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '02', type: '02', deviceType: 1 };
@@ -134,7 +224,6 @@ async function executePendingCommand(commandData) {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '03', type: '03', deviceType: 1 };
   }
-  // Compactor Motor (5.7-5.8)
   else if (action === 'compactorStart') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '04', type: '01', deviceType: 1 };
@@ -143,7 +232,6 @@ async function executePendingCommand(commandData) {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '04', type: '00', deviceType: 1 };
   }
-  // Weight (5.9-5.10)
   else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
     apiPayload = { moduleId: '06', type: '00' };
@@ -152,21 +240,14 @@ async function executePendingCommand(commandData) {
     apiUrl = `${LOCAL_API_BASE}/system/serial/weightCalibration`;
     apiPayload = { moduleId: '07', type: '00' };
   }
-  // Camera (5.11)
   else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
   }
-  // Stepper Motor (5.13)
   else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    apiPayload = { 
-      moduleId: '0F', 
-      type: params?.position || '00', 
-      deviceType: 1 
-    };
+    apiPayload = { moduleId: '0F', type: params?.position || '00', deviceType: 1 };
   }
-  // Multiple Motors (5.12)
   else if (action === 'multipleMotors') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/testAllMotor`;
     apiPayload = {
@@ -174,7 +255,6 @@ async function executePendingCommand(commandData) {
       list: params?.motorActions || []
     };
   }
-  // Custom Motor
   else if (action === 'customMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = {
@@ -200,15 +280,25 @@ async function executePendingCommand(commandData) {
     
     console.log(`✅ Success: ${result.status}`);
     
-    // Publish success response
-    const responseTopic = `rvm/${DEVICE_ID}/responses`;
-    mqttClient.publish(responseTopic, JSON.stringify({
+    // Include AI and weight data in response if available
+    const responseData = {
       command: action,
       success: true,
       result: result.data,
       moduleId: currentModuleId,
       timestamp: new Date().toISOString()
-    }));
+    };
+    
+    if (action === 'stepperAuto' || action === 'stepperMotor') {
+      responseData.aiResult = latestAIResult;
+    }
+    
+    if (action === 'getWeight') {
+      responseData.weight = latestWeight;
+    }
+    
+    const responseTopic = `rvm/${DEVICE_ID}/responses`;
+    mqttClient.publish(responseTopic, JSON.stringify(responseData));
     
   } catch (apiError) {
     console.error('❌ API Error:', apiError.message);
@@ -288,4 +378,8 @@ process.on('SIGINT', () => {
 console.log('========================================');
 console.log('🚀 RVM Agent Started');
 console.log(`📱 Device: ${DEVICE_ID}`);
+console.log('========================================');
+console.log('📊 Tracking:');
+console.log('  - AI Detection Results → rvm/${DEVICE_ID}/ai_result');
+console.log('  - Weight Readings → rvm/${DEVICE_ID}/weight_result');
 console.log('========================================\n');
