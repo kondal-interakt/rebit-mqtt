@@ -255,10 +255,10 @@ async function executeFullCycle() {
   
   try {
     let stepperPos = '00';
-    let collectMotor = '02';
+    let collectMotor = '02';  // Default to belt for transfer, override only for special collect
     
     switch (latestAIResult.materialType) {
-      case 'PLASTIC_BOTTLE': stepperPos = '03'; collectMotor = '03'; break;
+      case 'PLASTIC_BOTTLE': stepperPos = '03'; collectMotor = '03'; break;  // Keep '03' for plastic-specific collect
       case 'METAL_CAN': stepperPos = '02'; collectMotor = '02'; break;
       case 'GLASS': stepperPos = '01'; collectMotor = '02'; break;
     }
@@ -268,7 +268,13 @@ async function executeFullCycle() {
     const sequence = [
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
-      { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },
+      // NEW: Always run belt to push item toward bin
+      { action: 'transferForward' },
+      { delay: 2000 },  // Adjust duration based on hardware speed (e.g., 2-3s for full transfer)
+      { action: 'transferStop' },
+      { delay: 500 },
+      // Then material-specific collect (if different from belt)
+      ...(collectMotor === '03' ? [{ action: 'customMotor', params: { motorId: collectMotor, type: '03' } }] : []),
       { delay: 1500 },
       { action: 'compactorStart' },
       { delay: 5000 },
@@ -301,6 +307,8 @@ async function executeFullCycle() {
     cycleInProgress = false;
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'closeGate' });
+    // NEW: Emergency belt stop on error
+    await executeCommand({ action: 'transferStop' });
   }
 }
 
