@@ -32,7 +32,7 @@ function connectWebSocket() {
     console.log('✅ WebSocket connected to RVM');
   });
   
-  ws.on('message', (data) => {
+  ws.on('message', async (data) => {
     try {
       console.log('\n📩 WebSocket message:', data.toString());
       const message = JSON.parse(data);
@@ -45,7 +45,7 @@ function connectWebSocket() {
       
       // Handle getModuleId response (function: "01")
       if (message.function === '01') {
-        currentModuleId = message.moduleId;
+        currentModuleId = message.data;  // Fixed: use message.data per doc
         console.log(`✅ Module ID: ${currentModuleId}`);
         
         if (pendingCommands.size > 0) {
@@ -58,21 +58,62 @@ function connectWebSocket() {
       
       // Handle AI Photo Result (function: "aiPhoto")
       if (message.function === 'aiPhoto') {
-        latestAIResult = {
-          matchRate: message.data,
-          materialType: determineMaterialType(message),
-          rawData: message,
-          timestamp: new Date().toISOString()
-        };
-        
-        console.log('🤖 AI Detection Result:');
-        console.log(`   Match Rate: ${latestAIResult.matchRate}%`);
-        console.log(`   Material: ${latestAIResult.materialType}`);
-        console.log(`   Raw Data: ${JSON.stringify(message)}`);
-        
-        // Publish AI result to MQTT
-        const aiTopic = `rvm/${DEVICE_ID}/ai_result`;
-        mqttClient.publish(aiTopic, JSON.stringify(latestAIResult));
+        try {
+          // Parse the nested JSON in the 'data' field
+          const aiData = JSON.parse(message.data);
+          const probability = aiData.probability || 0;
+          const className = aiData.className || '';
+          
+          latestAIResult = {
+            matchRate: Math.round(probability * 100),  // Convert to percentage
+            materialType: determineMaterialType(aiData),
+            className: className,
+            taskId: aiData.taskId,
+            rawData: message,
+            timestamp: new Date().toISOString()
+          };
+          
+          console.log('🤖 AI Detection Result:');
+          console.log(`   Match Rate: ${latestAIResult.matchRate}%`);
+          console.log(`   Class Name: ${latestAIResult.className}`);
+          console.log(`   Material: ${latestAIResult.materialType}`);
+          
+          // AUTOMATION: If match rate >= 30% and material identified, auto-proceed
+          if (latestAIResult.matchRate >= 30 && latestAIResult.materialType !== 'UNKNOWN') {
+            console.log(`🤖 Auto-triggering workflow for ${latestAIResult.materialType}`);
+            
+            // Step 1: Get weight automatically
+            setTimeout(async () => {
+              await executePendingCommand({ action: 'getWeight' });
+            }, 500);  // Short delay for stability
+          } else {
+            console.log(`⚠️ AI confidence too low (${latestAIResult.matchRate}%) or unknown material - manual intervention needed`);
+            // Optionally publish to MQTT for user alert
+            mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
+              type: 'low_confidence',
+              message: `AI match rate: ${latestAIResult.matchRate}%, Material: ${latestAIResult.materialType}`,
+              timestamp: new Date().toISOString()
+            }));
+          }
+          
+          // Publish AI result to MQTT
+          const aiTopic = `rvm/${DEVICE_ID}/ai_result`;
+          mqttClient.publish(aiTopic, JSON.stringify(latestAIResult));
+        } catch (parseErr) {
+          console.error('❌ Failed to parse AI data:', parseErr.message);
+          // Fallback: treat as low confidence unknown
+          latestAIResult = {
+            matchRate: 0,
+            materialType: 'UNKNOWN',
+            className: '',
+            rawData: message,
+            timestamp: new Date().toISOString()
+          };
+          // Publish fallback
+          const aiTopic = `rvm/${DEVICE_ID}/ai_result`;
+          mqttClient.publish(aiTopic, JSON.stringify(latestAIResult));
+        }
+        return;
       }
       
       // Handle Weight Result (function: "06")
@@ -87,6 +128,78 @@ function connectWebSocket() {
         // Publish weight to MQTT
         const weightTopic = `rvm/${DEVICE_ID}/weight_result`;
         mqttClient.publish(weightTopic, JSON.stringify(latestWeight));
+        
+        // AUTOMATION: If valid, trigger sequenced motors via testAllMotor
+        if (latestAIResult && latestWeight.weight > 50) {
+          console.log(`✅ Valid weight detected - triggering sequenced operations`);
+          
+          let stepperPosition;
+          switch (latestAIResult.materialType) {
+            case 'PLASTIC_BOTTLE':
+              stepperPosition = '03';
+              break;
+            case 'METAL_CAN':
+              stepperPosition = '02';
+              break;
+            default:
+              stepperPosition = '01';
+          }
+          
+          // Define sequence: Stepper → Transfer → Compact Start (5s run) → Compact Stop → Close Gate
+          const motorSequence = [
+            {
+              moduleId: '0F',      // Stepper module
+              type: stepperPosition,
+              time: 2000           // Wait 2s after stepper positions
+            },
+            {
+              moduleId: currentModuleId,
+              motorId: latestAIResult.materialType === 'PLASTIC_BOTTLE' ? '03' : '02',
+              type: '03',          // To bin or forward
+              time: 3000           // Wait 3s for transfer
+            },
+            {
+              moduleId: currentModuleId,
+              motorId: '04',       // Compactor
+              type: '01',          // Start
+              time: 5000           // Run for 5s, then next auto-stops
+            },
+            {
+              moduleId: currentModuleId,
+              motorId: '04',
+              type: '00',          // Stop
+              time: 1000           // 1s pause
+            },
+            {
+              moduleId: currentModuleId,
+              motorId: '01',       // Gate
+              type: '00',          // Close
+              time: 0              // End sequence
+            }
+          ];
+          
+          // Execute the full sequence
+          await executePendingCommand({
+            action: 'multipleMotors',
+            params: {
+              initialDelay: 1000,    // 1s before starting
+              motorActions: motorSequence
+            }
+          });
+          
+          console.log('🏁 Sequenced operations dispatched');
+          // Publish completion (monitor WebSocket for final events)
+          mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
+            material: latestAIResult.materialType,
+            weight: latestWeight.weight,
+            sequence: 'testAllMotor',
+            timestamp: new Date().toISOString()
+          }));
+          
+        } else if (latestWeight.weight <= 50) {
+          console.log(`⚠️ Weight too low (${latestWeight.weight}g) - rejecting item`);
+          // Optional: Alert or reverse
+        }
       }
       
       // Publish all WebSocket events to MQTT
@@ -115,35 +228,30 @@ function connectWebSocket() {
 }
 
 // ======= DETERMINE MATERIAL TYPE FROM AI RESULT =======
-function determineMaterialType(aiMessage) {
-  // This function interprets the AI result to determine material type
-  // You may need to adjust this based on actual AI response format
+function determineMaterialType(aiData) {
+  const className = (aiData.className || '').toLowerCase();
+  const probability = aiData.probability || 0;
+  const matchRate = Math.round(probability * 100);
   
-  const matchRate = parseInt(aiMessage.data) || 0;
-  
-  // Check if there's additional data in the message
-  if (aiMessage.materialType) {
-    return aiMessage.materialType;
+  // Classify based on className keywords (adjust as needed for your AI model)
+  if (className.includes('pet瓶') || className.includes('plastic') || className.includes('瓶')) {
+    return 'PLASTIC_BOTTLE';
+  } else if (className.includes('易拉罐') || className.includes('metal') || className.includes('can') || className.includes('铝')) {
+    return 'METAL_CAN';
+  } else if (className.includes('玻璃') || className.includes('glass')) {
+    return 'GLASS';
   }
   
-  // If match rate is high enough, try to determine from other fields
-  if (matchRate >= 70) {
-    // Check for material indicators in the raw data
-    const rawData = JSON.stringify(aiMessage).toLowerCase();
-    
-    if (rawData.includes('pet') || rawData.includes('plastic') || rawData.includes('bottle')) {
+  // If no specific match, use probability threshold for default
+  if (matchRate >= 50) {  // Threshold for sensitivity
+    if (className.includes('瓶') || className.includes('bottle')) {
       return 'PLASTIC_BOTTLE';
-    } else if (rawData.includes('metal') || rawData.includes('can') || rawData.includes('aluminum')) {
-      return 'METAL_CAN';
+    } else {
+      return 'METAL_CAN';  // Default for cans
     }
   }
   
-  // Default: if match rate is high, assume plastic, otherwise unknown
-  if (matchRate >= 70) {
-    return 'PLASTIC_BOTTLE';  // Default assumption
-  } else {
-    return 'UNKNOWN';
-  }
+  return 'UNKNOWN';
 }
 
 // ======= GET MODULE ID =======
@@ -165,7 +273,7 @@ async function getModuleId() {
 async function executePendingCommand(commandData) {
   const { action, params } = commandData;
   
-  if (!currentModuleId) {
+  if (!currentModuleId && action !== 'getModuleId') {
     console.error('❌ No moduleId available!');
     return;
   }
@@ -175,32 +283,8 @@ async function executePendingCommand(commandData) {
   
   console.log(`🔄 Processing: ${action}`);
   
-  // Special handling for auto-stepper (uses latest AI result)
-  if (action === 'stepperAuto') {
-    if (!latestAIResult) {
-      console.error('❌ No AI result available for auto stepper positioning');
-      return;
-    }
-    
-    let stepperPosition;
-    switch (latestAIResult.materialType) {
-      case 'PLASTIC_BOTTLE':
-        stepperPosition = '03';  // Position for plastic bottle
-        break;
-      case 'METAL_CAN':
-        stepperPosition = '02';  // Position for metal can
-        break;
-      default:
-        stepperPosition = '01';  // Return to origin for unknown
-    }
-    
-    console.log(`🎯 Auto-positioning stepper to: ${stepperPosition} (${latestAIResult.materialType})`);
-    
-    apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    apiPayload = { moduleId: '0F', type: stepperPosition, deviceType: 1 };
-  }
   // Motor control commands
-  else if (action === 'openGate') {
+  if (action === 'openGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType: 1 };
   } 
@@ -289,7 +373,7 @@ async function executePendingCommand(commandData) {
       timestamp: new Date().toISOString()
     };
     
-    if (action === 'stepperAuto' || action === 'stepperMotor') {
+    if (action === 'stepperMotor') {
       responseData.aiResult = latestAIResult;
     }
     
