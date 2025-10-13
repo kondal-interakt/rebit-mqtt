@@ -1,12 +1,11 @@
 // Full RVM Agent Code (agent.js - Runs on RVM Machine)
 // Plain JS version - No TypeScript annotations
-// Updated: Aligned with official RVM-3101 spec (v1.0.2).
-// - Fetched currentModuleId from /system/serial/getModuleId API (WS function "01", data as module ID).
-// - Use currentModuleId dynamically for motor-related actions (e.g., motorSelect, stepMotorSelect) instead of hardcoding.
-// - For specialized modules like weight ('06'), calibration ('07'), keep as per spec since they are component-specific.
-// - deviceType set to '1' for RVM-3101 as per section 11.
-// - Retained WS handlers for "03" (abnormal), "deviceStatus" (bin full).
-// - Auto-calibrate if weight <=0.
+// Updated: Aligned with official RVM-3101 spec (v1.0.2) and log.
+// - Set currentModuleId = message.moduleId from WS response (e.g., "09") instead of message.data (serial).
+// - Fallback to message.data if moduleId absent.
+// - Use dynamic currentModuleId for motor actions.
+// - Retained fixed moduleIds for weight ('06'), calibration ('07'), stepper ('0F') per spec.
+// - deviceType fixed to 1 for RVM-3101.
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -25,7 +24,7 @@ const MQTT_PASSWORD = 'mqttUser@2025';
 const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
 
 // Store moduleId from API and latest results
-let currentModuleId = null;  // Fetched dynamically from getModuleId
+let currentModuleId = null;  // e.g., "09" from WS moduleId
 let latestAIResult = null;
 let latestWeight = null;
 let pendingCommands = new Map();
@@ -57,7 +56,7 @@ function connectWebSocket() {
       
       // Handle getModuleId response (function: "01")
       if (message.function === '01') {
-        currentModuleId = message.data;  // Dynamic module ID from API
+        currentModuleId = message.moduleId || message.data;  // Prefer moduleId ("09"), fallback to data
         console.log(`✅ Module ID: ${currentModuleId}`);
         
         if (commandPromises.has('getModuleId')) {
