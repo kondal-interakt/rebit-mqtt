@@ -125,7 +125,7 @@ function connectWebSocket() {
         }
         
         // Auto-cycle if valid
-        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 50 && !cycleInProgress) {
+        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
           console.log('✅ AUTO: Starting cycle...');
           cycleInProgress = true;
           await executeFullCycle();
