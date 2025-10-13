@@ -1,10 +1,9 @@
 // Full RVM Agent Code (agent.js - Runs on RVM Machine)
 // Plain JS version - No TypeScript annotations
-// Updated: Fixed moduleId fetching - non-blocking getModuleId() (fire-and-forget API call), WS sets currentModuleId = message.moduleId on "01".
-// - Added detailed logging for WS messages (serial, comId).
-// - Retained promise waits for other commands, but getModuleId no longer times out.
-// - Integrated provided code logic for pending commands and event logging.
-// - Aligned with spec: deviceType=1, fixed modules for weight/stepper.
+// Updated: Fixed timeout for motor commands - no waitForResponse for motors (rely on API success; WS "03" for status/alerts).
+// - Enhanced "03" handler: Parse data array, alert only if any state=1 (abnormal); log all statuses.
+// - Retained waits for getWeight, takePhoto, etc., where specific functions ("06", "aiPhoto") confirm.
+// - Added periodic "03" logging without blocking.
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -28,7 +27,7 @@ let latestAIResult = null;
 let latestWeight = null;
 let pendingCommands = new Map();
 
-// Response waiting mechanism (for non-getModuleId commands)
+// Response waiting mechanism (for non-motor commands)
 const commandPromises = new Map();
 
 // ======= WEBSOCKET CONNECTION =======
@@ -215,16 +214,36 @@ function connectWebSocket() {
         return;
       }
       
-      // Handle Abnormal (function: "03")
+      // Handle Abnormal/Status Report (function: "03") - enhanced parsing
       if (message.function === '03') {
-        console.log('🚨 RVM Abnormal Detected:', message.data);
-        mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
-          type: 'abnormal',
-          motors: message.data,
-          timestamp: new Date().toISOString()
-        }));
-        // Log as per provided code
-        console.log('⚠️ Device Error:', message.data);
+        try {
+          const motors = JSON.parse(message.data);  // Array of motor statuses
+          console.log('📊 Motor Status Report (function "03"):', JSON.stringify(motors, null, 2));
+          
+          // Check for abnormals (state=1)
+          const abnormals = motors.filter(m => m.state === 1);
+          if (abnormals.length > 0) {
+            console.log('🚨 Abnormal motors detected:', abnormals.map(m => `${m.motorTypeDesc} (${m.motorType})`));
+            mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
+              type: 'abnormal',
+              motors: abnormals,
+              timestamp: new Date().toISOString()
+            }));
+          } else {
+            console.log('✅ All motors normal');
+          }
+          
+          // Log as per provided code
+          console.log('⚠️ Device Error:', message.data);  // Legacy log
+        } catch (parseErr) {
+          console.error('❌ Failed to parse "03" data:', parseErr.message);
+          console.log('🚨 RVM Abnormal Detected (raw):', message.data);
+          mqttClient.publish(`rvm/${DEVICE_ID}/alerts`, JSON.stringify({
+            type: 'abnormal',
+            rawData: message.data,
+            timestamp: new Date().toISOString()
+          }));
+        }
         return;
       }
       
@@ -258,7 +277,7 @@ function connectWebSocket() {
         return;
       }
       
-      // Generic motor response
+      // Generic motor response (if any; unlikely per spec)
       if (message.function === 'motor' || message.function?.startsWith('motor')) {
         const commandId = message.commandId || message.data?.commandId || 'motor';
         if (commandPromises.has(commandId)) {
@@ -329,7 +348,7 @@ function determineMaterialType(aiData) {
   return 'UNKNOWN';
 }
 
-// ======= WAIT FOR RESPONSE (for commands except getModuleId) =======
+// ======= WAIT FOR RESPONSE (for non-motor commands) =======
 function waitForResponse(commandId, timeout = 10000) {
   return new Promise((resolve, reject) => {
     commandPromises.set(commandId, { resolve, reject });
@@ -449,10 +468,14 @@ async function executeCommand(commandData) {
     console.log(`✅ API Success: ${result.status}`);
     console.log(`📥 API Response:`, JSON.stringify(result.data, null, 2));
     
-    let wsResponse;
-    if (action !== 'getModuleId') {
+    let wsResponse = null;
+    // Wait for WS only for non-motor commands (e.g., weight, photo)
+    const isMotorCommand = ['openGate', 'closeGate', 'transferForward', 'transferReverse', 'transferStop', 'transferToCollectBin', 'compactorStart', 'compactorStop', 'stepperMotor', 'multipleMotors', 'customMotor'].includes(action);
+    if (!isMotorCommand && action !== 'getModuleId') {
       wsResponse = await waitForResponse(commandId);
       console.log(`✅ WebSocket response for ${action}:`, wsResponse.data || wsResponse);
+    } else if (isMotorCommand) {
+      console.log(`⏭️ Skipping WS wait for motor command ${action} - using API success + status reports via "03"`);
     }
     
     const responseData = {
@@ -465,14 +488,6 @@ async function executeCommand(commandData) {
       timestamp: new Date().toISOString()
     };
     
-    if (['stepperMotor', 'transferForward', 'transferReverse', 'transferStop', 'transferToCollectBin', 'compactorStart', 'compactorStop', 'openGate', 'closeGate'].includes(action)) {
-      responseData.aiResult = latestAIResult;
-    }
-    
-    if (action === 'getWeight') {
-      responseData.weight = latestWeight;
-    }
-    
     // Enhanced response as per provided code
     if (result.status === 200 && result.data.code === 200) {
       responseData.result = {
@@ -483,6 +498,14 @@ async function executeCommand(commandData) {
         moduleId: currentModuleId,
         details: result.data.data.message
       };
+    }
+    
+    if (['stepperMotor', 'transferForward', 'transferReverse', 'transferStop', 'transferToCollectBin', 'compactorStart', 'compactorStop', 'openGate', 'closeGate'].includes(action)) {
+      responseData.aiResult = latestAIResult;
+    }
+    
+    if (action === 'getWeight') {
+      responseData.weight = latestWeight;
     }
     
     const responseTopic = `rvm/${DEVICE_ID}/responses`;
