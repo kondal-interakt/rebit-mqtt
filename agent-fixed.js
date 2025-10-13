@@ -260,17 +260,19 @@ async function executeFullCycle() {
     switch (latestAIResult.materialType) {
       case 'PLASTIC_BOTTLE': stepperPos = '03'; collectMotor = '03'; break;  // Keep '03' for plastic-specific collect
       case 'METAL_CAN': stepperPos = '02'; collectMotor = '02'; break;
-      case 'GLASS': stepperPos = '01'; collectMotor = '02'; break;
+      case 'GLASS': stepperPos = '03'; collectMotor = '02'; break;  // UPDATED: Route to plastic bin (doc lacks glass pos; share with plastic)
     }
     
     console.log(`📍 Routing to bin ${stepperPos} for ${latestAIResult.materialType}`);
     
+    // TODO: Check bin full via deviceStatus (e.g., if code 0/1/3 for plastic/metal/glass, alert/reject)
+    
     const sequence = [
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
-      // NEW: Always run belt to push item toward bin
+      // Always run belt to push item toward bin
       { action: 'transferForward' },
-      { delay: 2000 },  // Adjust duration based on hardware speed (e.g., 2-3s for full transfer)
+      { delay: 2000 },  // Tune for belt speed to reach sorter limit
       { action: 'transferStop' },
       { delay: 500 },
       // Then material-specific collect (if different from belt)
@@ -284,6 +286,11 @@ async function executeFullCycle() {
       { delay: 1000 },
       { action: 'closeGate' }
     ];
+    
+    if (latestAIResult.materialType === 'GLASS') {
+      // OPTIONAL: Skip compactor for glass if hardware-specific (doc implies NONE for glass)
+      // Remove compactor steps above if confirmed
+    }
     
     await executeSequence(sequence);
     
@@ -307,7 +314,6 @@ async function executeFullCycle() {
     cycleInProgress = false;
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'closeGate' });
-    // NEW: Emergency belt stop on error
     await executeCommand({ action: 'transferStop' });
   }
 }
