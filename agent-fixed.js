@@ -1,5 +1,4 @@
 
-
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -294,33 +293,37 @@ async function executeFullCycle() {
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
       
-      // Step 2: Transfer belt moves forward to bring item to pusher (Motor 02)
+      // Step 2: Transfer belt moves forward (Motor 02) - should move to limit switch
       { action: 'transferForward' },
-      { delay: 3000 },  // Wait for belt to move item
+      { delay: 8000 },  // Increased from 3s to 8s - wait for belt to fully move
       
-      // Step 3: Stop transfer belt
-      { action: 'transferStop' },
-      { delay: 500 },
-      
-      // Step 4: Push item into bin (Motor 03)
+      // Step 3: Push item into bin (Motor 03) while belt still moving
       { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },
-      { delay: 2000 },
+      { delay: 3000 },  // Increased delay for pusher
       
-      // Step 5: Stop pusher
+      // Step 4: Stop pusher
       { action: 'customMotor', params: { motorId: collectMotor, type: '00' } },
       { delay: 500 },
       
-      // Step 6: Compact
+      // Step 5: Belt reverse back to clear pusher area
+      { action: 'transferReverse' },
+      { delay: 2000 },
+      
+      // Step 6: Stop transfer belt
+      { action: 'transferStop' },
+      { delay: 500 },
+      
+      // Step 7: Compact
       { action: 'compactorStart' },
       { delay: 5000 },
       { action: 'compactorStop' },
       { delay: 1000 },
       
-      // Step 7: Return stepper to home
+      // Step 8: Return stepper to home
       { action: 'stepperMotor', params: { position: '00' } },
       { delay: 1000 },
       
-      // Step 8: Close gate
+      // Step 9: Close gate
       { action: 'closeGate' }
     ];
     
