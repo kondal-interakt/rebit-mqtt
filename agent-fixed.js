@@ -1,18 +1,18 @@
-// RVM Agent v3.2 FIXED - Limit-Based Movements & Pusher Verification
+// RVM Agent v3.3 FIXED - Strict Middle Position & Error Handling
 // Changes: 
-// - Switched belt forward/reverse to limit-based (no timing)
-// - Added pusher status tracking & verification (wait for position '03')
-// - Assumes getMotorStatus endpoint triggers WS '03' update
-// - Extended pusher wait for plastics
-// Save as: agent-v3.2-FIXED.js
-// Run: node agent-v3.2-FIXED.js
+// - Forward belt: STRICT wait for '02' (middle) only; error/partial reverse if '03'
+// - Faster polling (500ms) in limits
+// - Verify: Check belt stays at '02' during push
+// - Added cycle abort if forward fails
+// Save as: agent-v3.3-FIXED.js
+// Run: node agent-v3.3-FIXED.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-console.log('🔥 LOADING RVM AGENT VERSION 3.2 FIXED 🔥');
+console.log('🔥 LOADING RVM AGENT VERSION 3.3 FIXED 🔥');
 
 // ======= CONFIGURATION =======
 const DEVICE_ID = 'RVM-3101';
@@ -42,7 +42,7 @@ let lastPusherStatus = null;  // Track pusher motor (03) status
 
 // ======= ENHANCED BELT & PUSHER CONTROL FUNCTIONS =======
 async function transferForwardToLimit() {
-  console.log('🎯 Transfer forward to LIMIT SWITCH');
+  console.log('🎯 Transfer forward to MIDDLE LIMIT SWITCH (strict \'02\')');
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -57,7 +57,7 @@ async function transferForwardToLimit() {
   let positionReached = false;
   
   while (Date.now() - startTime < 15000) { // 15s timeout
-    await delay(1000);
+    await delay(500);  // Faster polling
     
     if (lastBeltStatus?.position === '02') {
       console.log('✅ Reached middle position (limit switch)');
@@ -66,16 +66,30 @@ async function transferForwardToLimit() {
     }
     
     if (lastBeltStatus?.position === '03') {
-      console.log('✅ Reached end position');
-      positionReached = true;
-      break;
+      console.log('❌ Overshot to end position - partial reverse');
+      await executeCommand({ action: 'transferReverse' });
+      await delay(2000);  // Quick pull back
+      await executeCommand({ action: 'transferStop' });
+      // Retry forward briefly
+      await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '02' } });
+      await delay(3000);
+      await executeCommand({ action: 'transferStop' });
+      // Check again
+      if (lastBeltStatus?.position === '02') {
+        positionReached = true;
+        break;
+      } else {
+        console.log('❌ Retry failed - abort cycle');
+        throw new Error('Belt positioning failed');
+      }
     }
     
     console.log(`⏳ Current belt position: ${lastBeltStatus?.position || 'unknown'}`);
   }
   
   if (!positionReached) {
-    console.log('❌ Timeout waiting for limit switch');
+    console.log('❌ Timeout waiting for middle position');
+    throw new Error('Belt forward timeout');
   }
   
   await executeCommand({ action: 'transferStop' });
@@ -89,7 +103,7 @@ async function transferReverseToStart() {
   let positionReached = false;
 
   while (Date.now() - startTime < 15000) {  // 15s timeout
-    await delay(1000);
+    await delay(500);  // Faster polling
     if (lastBeltStatus?.position === '01') {  // Start position
       console.log('✅ Reached start position');
       positionReached = true;
@@ -111,6 +125,15 @@ async function verifyEjection() {
     await delay(500);
     // Poll motor status to trigger WS update
     await executeCommand({ action: 'getMotorStatus' });
+
+    // Check belt still at middle '02' (alignment)
+    if (lastBeltStatus?.position !== '02') {
+      console.log(`⚠️ Belt moved during push: ${lastBeltStatus?.position}`);
+      // Quick re-align
+      await executeCommand({ action: 'transferForward' });
+      await delay(1000);
+      await executeCommand({ action: 'transferStop' });
+    }
 
     // Check pusher reached end position ('03')
     if (lastPusherStatus?.position === '03') {
@@ -374,7 +397,7 @@ async function autoRecoverMotors(abnormals) {
   console.log('🔧 Recovery sequence finished (30s cooldown active)');
 }
 
-// ======= UPDATED FULL CYCLE - LIMIT-BASED & PUSHER VERIFICATION =======
+// ======= UPDATED FULL CYCLE - STRICT POSITIONING =======
 async function executeFullCycle() {
   console.log('🚀 AUTO: Full cycle starting');
   
@@ -401,7 +424,7 @@ async function executeFullCycle() {
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 3000 }, // Wait for stepper
       
-      // Step 2: Transport to limit (no timing - hardware controlled)
+      // Step 2: Transport to MIDDLE limit (strict '02')
       { action: 'transferForwardToLimit' },
       { delay: 1000 }, // Brief settle
       
@@ -411,7 +434,7 @@ async function executeFullCycle() {
       { action: 'customMotor', params: { motorId: collectMotor, type: '00' } }, // Stop
       { delay: 1000 },
       
-      // Step 3.5: Verify pusher ejection
+      // Step 3.5: Verify pusher ejection & belt alignment
       { action: 'verifyEjection' },
       { delay: 1000 },
       
@@ -453,11 +476,19 @@ async function executeFullCycle() {
   } catch (err) {
     console.error('❌ Cycle failed:', err.message);
     cycleInProgress = false;
-    // Emergency stop
+    // Emergency stop & abort
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'transferStop' });
     await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+    await executeCommand({ action: 'transferReverse' });  // Emergency pull back
+    await delay(3000);
+    await executeCommand({ action: 'transferStop' });
     await executeCommand({ action: 'closeGate' });
+    
+    mqttClient.publish(`rvm/${DEVICE_ID}/cycle_error`, JSON.stringify({
+      error: err.message,
+      timestamp: new Date().toISOString()
+    }));
   }
 }
 
@@ -676,14 +707,14 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v3.2 FIXED');
+console.log('🚀 RVM AGENT v3.3 FIXED');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
 console.log('🔧 FIXED FEATURES:');
-console.log('   - Limit-based belt forward/reverse (no 10s/4s timing)');
-console.log('   - Pusher verification (wait for position \'03\')');
-console.log('   - Separate MQTT for pusher status');
-console.log('   - getMotorStatus assumes type \'03\' for all status');
+console.log('   - STRICT middle \'02\' for forward (error if \'03\')');
+console.log('   - Faster polling (500ms) in limits');
+console.log('   - Verify checks belt alignment during push');
+console.log('   - Cycle abort + emergency reverse on fail');
 console.log('========================================');
 console.log('🤖 AUTO MODE:');
 console.log('   Enable: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
