@@ -1,19 +1,18 @@
-// RVM Agent v3.1 FIXED - Enhanced Belt Control & Ejection Verification
+// RVM Agent v3.2 FIXED - Limit-Based Movements & Pusher Verification
 // Changes: 
-// - Added ejection verification before belt reverse
-// - Extended pusher duration for plastic bottles
-// - Position-aware belt reverse to start
-// - Enhanced logging & MQTT for belt status
-// - Assumes /system/serial/getMotorStatus endpoint exists for polling
-// Save as: agent-v3.1-FIXED.js
-// Run: node agent-v3.1-FIXED.js
+// - Switched belt forward/reverse to limit-based (no timing)
+// - Added pusher status tracking & verification (wait for position '03')
+// - Assumes getMotorStatus endpoint triggers WS '03' update
+// - Extended pusher wait for plastics
+// Save as: agent-v3.2-FIXED.js
+// Run: node agent-v3.2-FIXED.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-console.log('🔥 LOADING RVM AGENT VERSION 3.1 FIXED 🔥');
+console.log('🔥 LOADING RVM AGENT VERSION 3.2 FIXED 🔥');
 
 // ======= CONFIGURATION =======
 const DEVICE_ID = 'RVM-3101';
@@ -38,13 +37,13 @@ let calibrationAttempts = 0;
 
 const IGNORE_MOTOR_RECOVERY = ['05'];
 let ws = null;
-let lastBeltStatus = null;  // Track belt motor status
+let lastBeltStatus = null;  // Track belt motor (02) status
+let lastPusherStatus = null;  // Track pusher motor (03) status
 
-// ======= ENHANCED BELT CONTROL FUNCTIONS =======
+// ======= ENHANCED BELT & PUSHER CONTROL FUNCTIONS =======
 async function transferForwardToLimit() {
   console.log('🎯 Transfer forward to LIMIT SWITCH');
   
-  // Use the specific forward-to-limit command
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -83,57 +82,15 @@ async function transferForwardToLimit() {
   return positionReached;
 }
 
-async function transferForwardExtended() {
-  console.log('🎯 Extended belt forward movement');
-  
-  // Use continuous movement for longer duration
-  console.log('➡️ Continuous forward (10s)...');
-  await executeCommand({ action: 'transferForward' });
-  await delay(10000);
-  
-  await executeCommand({ action: 'transferStop' });
-  console.log('✅ Extended movement complete');
-  return true;
-}
-
-async function verifyEjection() {
-  console.log('🔍 Verifying bottle ejection...');
-  const startTime = Date.now();
-  let ejected = false;
-
-  while (Date.now() - startTime < 5000) {  // 5s timeout
-    await delay(500);
-    // Poll motor status via WS (trigger a status request if needed)
-    await executeCommand({ action: 'getMotorStatus' });
-
-    if (lastBeltStatus?.position === '03' ||  // End position (belt clear)
-        lastBeltStatus?.load === 0 ||  // If load sensor available; adjust per hardware
-        !lastBeltStatus?.hasItem) {    // Pseudo: Add if sensor exists
-      console.log('✅ Bottle ejected - belt clear');
-      ejected = true;
-      break;
-    }
-    console.log(`⏳ Belt not clear: position ${lastBeltStatus?.position}`);
-  }
-
-  if (!ejected) {
-    console.log('⚠️ Ejection failed - retry push');
-    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '03' } });
-    await delay(2000);  // Extra push time
-    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
-  }
-  return ejected;
-}
-
 async function transferReverseToStart() {
   console.log('🎯 Reverse to START position');
   await executeCommand({ action: 'transferReverse' });
   const startTime = Date.now();
   let positionReached = false;
 
-  while (Date.now() - startTime < 10000) {  // 10s timeout
+  while (Date.now() - startTime < 15000) {  // 15s timeout
     await delay(1000);
-    if (lastBeltStatus?.position === '01') {  // Assume '01' = start
+    if (lastBeltStatus?.position === '01') {  // Start position
       console.log('✅ Reached start position');
       positionReached = true;
       break;
@@ -143,6 +100,39 @@ async function transferReverseToStart() {
 
   await executeCommand({ action: 'transferStop' });
   return positionReached;
+}
+
+async function verifyEjection() {
+  console.log('🔍 Verifying bottle ejection...');
+  const startTime = Date.now();
+  let ejected = false;
+
+  while (Date.now() - startTime < 8000) {  // 8s timeout
+    await delay(500);
+    // Poll motor status to trigger WS update
+    await executeCommand({ action: 'getMotorStatus' });
+
+    // Check pusher reached end position ('03')
+    if (lastPusherStatus?.position === '03') {
+      console.log('✅ Pusher reached end - bottle ejected');
+      ejected = true;
+      break;
+    }
+    console.log(`⏳ Pusher not at end: position ${lastPusherStatus?.position || 'unknown'}`);
+  }
+
+  if (!ejected) {
+    console.log('⚠️ Ejection failed - retry push');
+    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '03' } });
+    await delay(3000);  // Extra push time
+    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+    // Re-check
+    await delay(2000);
+    if (lastPusherStatus?.position === '03') {
+      ejected = true;
+    }
+  }
+  return ejected;
 }
 
 // ======= WEBSOCKET =======
@@ -250,17 +240,23 @@ function connectWebSocket() {
           
           motors.forEach(motor => {
             motorStatusCache[motor.motorType] = motor;
-            if (motor.motorType === '02') lastBeltStatus = motor;  // Track belt
+            if (motor.motorType === '02') {
+              lastBeltStatus = motor;  // Track belt
+              mqttClient.publish(`rvm/${DEVICE_ID}/belt_status`, JSON.stringify({
+                position: lastBeltStatus.position,
+                state: lastBeltStatus.state,
+                timestamp: new Date().toISOString()
+              }));
+            }
+            if (motor.motorType === '03') {
+              lastPusherStatus = motor;  // Track pusher
+              mqttClient.publish(`rvm/${DEVICE_ID}/pusher_status`, JSON.stringify({
+                position: lastPusherStatus.position,
+                state: lastPusherStatus.state,
+                timestamp: new Date().toISOString()
+              }));
+            }
           });
-          
-          // Enhanced logging: Publish belt status to MQTT
-          if (lastBeltStatus) {
-            mqttClient.publish(`rvm/${DEVICE_ID}/belt_status`, JSON.stringify({
-              position: lastBeltStatus.position,
-              state: lastBeltStatus.state,
-              timestamp: new Date().toISOString()
-            }));
-          }
           
           const abnormals = motors.filter(m => m.state === 1);
           
@@ -378,13 +374,13 @@ async function autoRecoverMotors(abnormals) {
   console.log('🔧 Recovery sequence finished (30s cooldown active)');
 }
 
-// ======= UPDATED FULL CYCLE - WITH EJECTION VERIFICATION =======
+// ======= UPDATED FULL CYCLE - LIMIT-BASED & PUSHER VERIFICATION =======
 async function executeFullCycle() {
   console.log('🚀 AUTO: Full cycle starting');
   
   try {
     let stepperPos = '00';
-    let collectMotor = '03'; // Default to pusher motor (03) for all materials
+    let collectMotor = '03'; // Pusher motor (03)
     
     switch (latestAIResult.materialType) {
       case 'PLASTIC_BOTTLE': 
@@ -403,23 +399,23 @@ async function executeFullCycle() {
     const sequence = [
       // Step 1: Move stepper to correct position
       { action: 'stepperMotor', params: { position: stepperPos } },
-      { delay: 3000 }, // Wait for stepper to complete
+      { delay: 3000 }, // Wait for stepper
       
-      // Step 2: Transport bottle INSIDE using extended movement
-      { action: 'transferForwardExtended' },
-      { delay: 2000 }, // Wait for belt to stop
+      // Step 2: Transport to limit (no timing - hardware controlled)
+      { action: 'transferForwardToLimit' },
+      { delay: 1000 }, // Brief settle
       
-      // Step 3: Push bottle INTO bin (extended for plastics)
-      { action: 'customMotor', params: { motorId: collectMotor, type: '03' } }, // Type 03 = INTO bin
-      { delay: latestAIResult.materialType === 'PLASTIC_BOTTLE' ? 5000 : 3000 }, // 5s for bottles
-      { action: 'customMotor', params: { motorId: collectMotor, type: '00' } }, // Stop pusher
+      // Step 3: Push INTO bin (extended wait for plastics)
+      { action: 'customMotor', params: { motorId: collectMotor, type: '03' } }, // To end position
+      { delay: latestAIResult.materialType === 'PLASTIC_BOTTLE' ? 5000 : 3000 },
+      { action: 'customMotor', params: { motorId: collectMotor, type: '00' } }, // Stop
       { delay: 1000 },
       
-      // NEW: Step 3.5: Verify ejection before reverse
+      // Step 3.5: Verify pusher ejection
       { action: 'verifyEjection' },
       { delay: 1000 },
       
-      // Step 4: Position-aware return to start
+      // Step 4: Reverse belt to start (limit-based)
       { action: 'transferReverseToStart' },
       { delay: 1000 },
       
@@ -457,9 +453,10 @@ async function executeFullCycle() {
   } catch (err) {
     console.error('❌ Cycle failed:', err.message);
     cycleInProgress = false;
-    // Emergency stop all motors
+    // Emergency stop
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'transferStop' });
+    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
     await executeCommand({ action: 'closeGate' });
   }
 }
@@ -512,9 +509,6 @@ async function executeCommand(commandData) {
   } else if (action === 'transferStop') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '02', type: '00', deviceType };
-  } else if (action === 'transferToCollectBin') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '03', type: '03', deviceType };
   } else if (action === 'compactorStart') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '04', type: '01', deviceType };
@@ -542,16 +536,15 @@ async function executeCommand(commandData) {
       deviceType
     };
   } else if (action === 'getMotorStatus') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/getMotorStatus`;
-    apiPayload = { moduleId: currentModuleId };
+    // Assumes this triggers WS '03' for all motors (module 03: get all status)
+    apiUrl = `${LOCAL_API_BASE}/system/serial/getModuleStatus`;  // Or adjust to match doc (e.g., motorSelect with type for status)
+    apiPayload = { moduleId: currentModuleId, type: '03' };  // Type '03' for get all?
   } else if (action === 'transferForwardToLimit') {
     return await transferForwardToLimit();
-  } else if (action === 'transferForwardExtended') {
-    return await transferForwardExtended();
-  } else if (action === 'verifyEjection') {
-    return await verifyEjection();
   } else if (action === 'transferReverseToStart') {
     return await transferReverseToStart();
+  } else if (action === 'verifyEjection') {
+    return await verifyEjection();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -683,17 +676,16 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v3.1 FIXED');
+console.log('🚀 RVM AGENT v3.2 FIXED');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
 console.log('🔧 FIXED FEATURES:');
-console.log('   - Ejection verification before reverse');
-console.log('   - Extended pusher for plastic bottles (5s)');
-console.log('   - Position-aware belt reverse to start');
-console.log('   - MQTT belt status publishing');
-console.log('   - Enhanced motor status polling');
+console.log('   - Limit-based belt forward/reverse (no 10s/4s timing)');
+console.log('   - Pusher verification (wait for position \'03\')');
+console.log('   - Separate MQTT for pusher status');
+console.log('   - getMotorStatus assumes type \'03\' for all status');
 console.log('========================================');
 console.log('🤖 AUTO MODE:');
 console.log('   Enable: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
-console.log('   Status: curl http://localhost:3008/api/rvm/RVM-3101/auto/status');
+console.log('   Capture: curl -X POST http://localhost:3008/api/rvm/RVM-3101/camera/capture');
 console.log('========================================\n');
