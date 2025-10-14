@@ -1,23 +1,10 @@
-// RVM Agent v3.6 - MATCHES ACTUAL MACHINE CONFIGURATION + SAFE OPERATIONS
-// Based on machine config screen analysis:
-// - Transfer motor: CW direction
-// - Press plate (pusher) motor: CCW  
-// - Separate compactors for plastic vs cans
-// - Transfer timeout: 5000ms
-// 
+// RVM Agent v3.6 - SAFE OPERATIONS (Fixed Async)
 // CRITICAL FIXES:
 // 1. Safe gate opening - Retracts press plate & stops belt BEFORE opening
 // 2. Safe photo capture - Stops ALL motors BEFORE taking photo
 //    → Prevents bottle ejection when hitting camera/capture API
-// 
-// USAGE:
-// 1. Enable auto: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable
-// 2. Place bottle (gate opens safely, bottle stays in place)
-// 3. Capture: curl -X POST http://localhost:3008/api/rvm/RVM-3101/camera/capture
-// 4. Bottle remains in place during photo, then processes normally
-//
-// Save as: agent-v3.6-config-match.js
-// Run: node agent-v3.6-config-match.js
+// Save as: agent-v3.6-safe.js
+// Run: node agent-v3.6-safe.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -33,14 +20,13 @@ const MQTT_USERNAME = 'mqttuser';
 const MQTT_PASSWORD = 'mqttUser@2025';
 const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
 
-// Motor Configuration (from machine config screen)
 const MOTOR_CONFIG = {
-  GATE: '01',              // Gate motor
-  TRANSFER: '02',          // Transfer belt motor (CW direction)
-  PRESS_PLATE: '03',       // Press plate (pusher) motor (CCW direction)
-  PLASTIC_COMPACTOR: '04', // Plastic compactor
-  CANS_COMPACTOR: '05',    // Cans compactor (might be different motor)
-  STEPPER: 'stepper'       // Sorter/stepper motor
+  GATE: '01',
+  TRANSFER: '02',
+  PRESS_PLATE: '03',
+  PLASTIC_COMPACTOR: '04',
+  CANS_COMPACTOR: '05',
+  STEPPER: 'stepper'
 };
 
 // State
@@ -58,22 +44,23 @@ let ws = null;
 let lastBeltStatus = null;
 let lastPusherStatus = null;
 
-// ======= SAFE CAMERA CAPTURE - NO MOTOR MOVEMENT =======
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ======= SAFE PHOTO CAPTURE =======
 async function safeTakePhoto() {
   console.log('📸 Safe photo capture...');
   
-  // CRITICAL: Ensure ALL motors are STOPPED before photo
-  console.log('   Stopping all motors...');
-  
-  // Stop press plate (ensure UP/retracted)
+  // Stop press plate (ensure UP)
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' } // UP
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' }
   });
   await delay(1500);
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } // STOP
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' }
   });
   await delay(300);
   
@@ -86,44 +73,36 @@ async function safeTakePhoto() {
   await delay(300);
   
   // NOW take photo
-  console.log('   Taking photo...');
   await executeCommand({ action: 'takePhoto' });
-  
   console.log('✅ Photo captured safely');
 }
 
-// ======= SAFE GATE OPENING - ENSURE NO EJECTION =======
+// ======= SAFE GATE OPERATIONS =======
 async function safeOpenGate() {
-  console.log('🚪 Safe gate opening sequence...');
+  console.log('🚪 Safe gate opening...');
   
-  // Step 1: Ensure press plate is UP (retracted) first!
-  console.log('   Retracting press plate...');
+  // Retract press plate UP
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' } // UP/Reverse
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' }
   });
   await delay(2000);
-  
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } // STOP
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' }
   });
   await delay(500);
   
-  // Step 2: Ensure belt is stopped and at start
-  console.log('   Ensuring belt at start...');
+  // Ensure belt at start
   await ensureBeltAtStart();
   await delay(500);
   
-  // Step 3: NOW open gate
-  console.log('   Opening gate...');
+  // Open gate
   await executeCommand({ action: 'openGate' });
   await delay(1000);
-  
-  // Step 4: Stop gate motor (important!)
   await executeCommand({ action: 'gateMotorStop' });
   
-  console.log('✅ Gate open safely - ready for bottle');
+  console.log('✅ Gate open safely');
 }
 
 async function safeCloseGate() {
@@ -136,7 +115,6 @@ async function safeCloseGate() {
 
 // ======= BELT CONTROL =======
 async function ensureBeltAtStart() {
-  console.log('🔍 Ensuring belt at start...');
   const currentPos = lastBeltStatus?.position || '00';
   
   if (currentPos === '01') {
@@ -144,11 +122,10 @@ async function ensureBeltAtStart() {
     return true;
   }
   
-  console.log(`   Moving from ${currentPos} to start...`);
-  // Use reverse (type '01') to go to start
+  console.log(`Moving belt from ${currentPos} to start...`);
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' } 
+    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' }
   });
   
   const startTime = Date.now();
@@ -164,46 +141,17 @@ async function ensureBeltAtStart() {
   await executeCommand({ action: 'transferStop' });
   return true;
 }
-  console.log('🔍 Ensuring belt at start...');
-  const currentPos = lastBeltStatus?.position || '00';
-  
-  if (currentPos === '01') {
-    console.log('✅ Belt at start');
-    return true;
-  }
-  
-  console.log(`   Moving from ${currentPos} to start...`);
-  // Use reverse (type '01') to go to start
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' } 
-  });
-  
-  const startTime = Date.now();
-  while (Date.now() - startTime < 10000) {
-    await delay(400);
-    if (lastBeltStatus?.position === '01') {
-      await executeCommand({ action: 'transferStop' });
-      console.log('✅ Belt at start');
-      return true;
-    }
-  }
-  
-  await executeCommand({ action: 'transferStop' });
-  return true;
-
 
 async function moveToMiddlePosition() {
-  console.log('🎯 Moving to middle position...');
+  console.log('🎯 Moving to middle...');
   
   await ensureBeltAtStart();
   await delay(500);
   
-  // Try using limit switch mode (type '02' should go to limit)
-  console.log('   Using transfer limit command...');
+  // Use forward to limit
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '02' } 
+    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '02' }
   });
   
   const startTime = Date.now();
@@ -214,22 +162,21 @@ async function moveToMiddlePosition() {
     const pos = lastBeltStatus?.position || '00';
     
     if (pos === '02') {
-      console.log('✅ Reached middle limit switch');
+      console.log('✅ Reached middle');
       await executeCommand({ action: 'transferStop' });
       reached = true;
       break;
     }
     
-    // If it went to '03', do a quick reverse
     if (pos === '03') {
-      console.log('⚠️ Overshot, quick reverse...');
+      console.log('⚠️ Overshot, reversing...');
       await executeCommand({ action: 'transferStop' });
       await delay(300);
       await executeCommand({ 
         action: 'customMotor', 
-        params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' } 
+        params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' }
       });
-      await delay(800);  // Short reverse
+      await delay(800);
       await executeCommand({ action: 'transferStop' });
       
       if (lastBeltStatus?.position === '02') {
@@ -253,7 +200,7 @@ async function returnToStart() {
   
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' } 
+    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' }
   });
   
   const startTime = Date.now();
@@ -270,72 +217,59 @@ async function returnToStart() {
   return true;
 }
 
-// ======= PRESS PLATE (PUSHER) CONTROL =======
+// ======= PRESS PLATE CONTROL =======
 async function pushBottleIntoChute() {
-  console.log('💪 Pushing bottle into chute...');
+  console.log('💪 Pushing bottle...');
   
-  // Press plate DOWN (type '03' = to end position)
+  // Press plate DOWN
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '03' } 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '03' }
   });
-  
-  // Wait for push (8 seconds for full ejection)
   await delay(8000);
   
   // Wait for gravity
-  console.log('⏳ Waiting for bottle to drop...');
+  console.log('⏳ Waiting for drop...');
   await delay(3000);
   
-  // Press plate UP (type '01' = reverse/retract)
-  console.log('↑ Retracting press plate...');
+  // Press plate UP
+  console.log('↑ Retracting...');
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' } 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' }
   });
+  await delay(3000);
   
-  await delay(3000);  // Wait for retraction
-  
-  // Stop press plate
+  // Stop
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' }
   });
-  
   await delay(500);
+  
   console.log('✅ Push complete');
 }
 
-// ======= COMPACTOR CONTROL =======
+// ======= COMPACTOR =======
 async function runCompactor(materialType) {
-  console.log(`🔨 Running ${materialType} compactor...`);
+  console.log(`🔨 Running compactor...`);
   
-  let compactorMotor;
+  let motor = materialType === 'PLASTIC_BOTTLE' 
+    ? MOTOR_CONFIG.PLASTIC_COMPACTOR 
+    : MOTOR_CONFIG.PLASTIC_COMPACTOR;
   
-  // Use correct compactor based on material
-  if (materialType === 'PLASTIC_BOTTLE') {
-    compactorMotor = MOTOR_CONFIG.PLASTIC_COMPACTOR;  // Motor '04'
-  } else if (materialType === 'METAL_CAN') {
-    compactorMotor = MOTOR_CONFIG.CANS_COMPACTOR;     // Motor '05' or same as '04'
-  } else {
-    compactorMotor = MOTOR_CONFIG.PLASTIC_COMPACTOR;  // Default
-  }
-  
-  // Start compactor (try type '01' first, as shown in config)
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: compactorMotor, type: '01' } 
+    params: { motorId: motor, type: '01' }
   });
+  await delay(6000);
   
-  await delay(6000);  // Run for 6 seconds
-  
-  // Stop compactor
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: compactorMotor, type: '00' } 
+    params: { motorId: motor, type: '00' }
   });
-  
   await delay(1000);
+  
   console.log('✅ Compactor done');
 }
 
@@ -354,41 +288,33 @@ async function executeFullCycle() {
     
     console.log(`📍 ${latestAIResult.materialType} → Bin ${stepperPos}`);
     
-    // Step 0: Ensure starting position
     await ensureBeltAtStart();
     await delay(1000);
     
-    // Step 1: Position sorter/stepper
     console.log('🔄 Positioning sorter...');
     await executeCommand({ 
       action: 'stepperMotor', 
-      params: { position: stepperPos } 
+      params: { position: stepperPos }
     });
     await delay(3000);
     
-    // Step 2: Move belt to middle
     await moveToMiddlePosition();
     await delay(1000);
     
-    // Step 3: Push bottle with press plate
     await pushBottleIntoChute();
     
-    // Step 4: Return belt to start
     await returnToStart();
     await delay(1000);
     
-    // Step 5: Run appropriate compactor
     await runCompactor(latestAIResult.materialType);
     
-    // Step 6: Reset sorter to home
     console.log('🏠 Resetting sorter...');
     await executeCommand({ 
       action: 'stepperMotor', 
-      params: { position: '00' } 
+      params: { position: '00' }
     });
     await delay(2000);
     
-    // Step 7: Close gate safely
     await safeCloseGate();
     
     console.log('✅ Cycle complete!\n');
@@ -408,15 +334,14 @@ async function executeFullCycle() {
     console.error('❌ Cycle failed:', err.message);
     cycleInProgress = false;
     
-    // Emergency cleanup
     await executeCommand({ action: 'transferStop' });
     await executeCommand({ 
       action: 'customMotor', 
-      params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } 
+      params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' }
     });
     await executeCommand({ 
       action: 'customMotor', 
-      params: { motorId: MOTOR_CONFIG.PLASTIC_COMPACTOR, type: '00' } 
+      params: { motorId: MOTOR_CONFIG.PLASTIC_COMPACTOR, type: '00' }
     });
     await safeCloseGate();
   }
@@ -496,8 +421,7 @@ function connectWebSocket() {
           cycleInProgress = true;
           await executeFullCycle();
         } else if (latestWeight.weight <= 10 && latestWeight.weight > 0) {
-          console.log(`⚠️ Too light (${latestWeight.weight}g) - rejecting`);
-          // Reject by opening and closing gate (bottle falls back out)
+          console.log(`⚠️ Too light (${latestWeight.weight}g)`);
           await executeCommand({ action: 'openGate' });
           await delay(1000);
           await executeCommand({ action: 'gateMotorStop' });
@@ -585,14 +509,14 @@ async function autoRecoverMotors(abnormals) {
         case '03': 
           await executeCommand({ 
             action: 'customMotor', 
-            params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } 
+            params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' }
           });
           await delay(500);
           break;
         case '04': 
           await executeCommand({ 
             action: 'customMotor', 
-            params: { motorId: MOTOR_CONFIG.PLASTIC_COMPACTOR, type: '00' } 
+            params: { motorId: MOTOR_CONFIG.PLASTIC_COMPACTOR, type: '00' }
           });
           await delay(500);
           break;
@@ -622,10 +546,6 @@ function determineMaterialType(aiData) {
   }
   
   return aiData.probability >= 0.5 ? 'PLASTIC_BOTTLE' : 'UNKNOWN';
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ======= EXECUTE COMMAND =======
@@ -752,9 +672,9 @@ mqttClient.on('message', async (topic, message) => {
     if (topic.includes('/commands')) {
       console.log(`📩 Command: ${payload.action}`);
       
-      // Intercept takePhoto command and use safe version
+      // Intercept takePhoto and use safe version
       if (payload.action === 'takePhoto') {
-        console.log('⚠️ Intercepting takePhoto - using safe version');
+        console.log('⚠️ Using safe photo capture');
         payload.action = 'safeTakePhoto';
       }
       
@@ -779,19 +699,15 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v3.6 - CONFIG MATCHED');
+console.log('🚀 RVM AGENT v3.6 - SAFE OPERATIONS');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🔧 Based on actual machine configuration:');
-console.log('   - Transfer motor: CW direction');
-console.log('   - Press plate (pusher): CCW direction');
-console.log('   - Plastic compactor: Motor 04');
-console.log('   - Cans compactor: Motor 05 (separate)');
-console.log('   - Transfer timeout: 5000ms');
+console.log('🛡️ FIXES:');
+console.log('   1. Safe gate: Press plate UP + Belt stop');
+console.log('   2. Safe capture: ALL motors stop before photo');
+console.log('   3. No bottle ejection on capture!');
 console.log('========================================');
-console.log('📋 Sequence:');
-console.log('   Start → Sorter → Middle → PRESS → Wait');
-console.log('   → Retract → Return → Compact → Reset');
-console.log('========================================');
-console.log('🤖 curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
+console.log('🤖 USAGE:');
+console.log('   Enable: POST /api/rvm/RVM-3101/auto/enable');
+console.log('   Capture: POST /api/rvm/RVM-3101/camera/capture');
 console.log('========================================\n');
