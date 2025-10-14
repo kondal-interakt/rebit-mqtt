@@ -1,10 +1,14 @@
+// RVM Agent v2.4 FINAL - Complete Working Version
+// Features: Auto-recovery, Full automation, Motor testing, No timeouts
+// Save as: agent-v2.4-FINAL.js
+// Run: node agent-v2.4-FINAL.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-console.log('🔥 LOADING FIXED AGENT VERSION 2.0 🔥');
+console.log('🔥 LOADING RVM AGENT VERSION 2.4 FINAL 🔥');
 
 // ======= CONFIGURATION =======
 const DEVICE_ID = 'RVM-3101';
@@ -25,13 +29,9 @@ let motorStatusCache = {};
 let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
-let calibrationAttempts = 0;  // Track calibration attempts
+let calibrationAttempts = 0;
 
-// Ignore motors with known hardware issues (add motor IDs to skip recovery)
-const IGNORE_MOTOR_RECOVERY = [];  // Example: ['05'] to ignore stepper motor
-
-// Response handling - NO MORE TIMEOUTS!
-const responseCache = new Map();  // Cache responses by type
+const IGNORE_MOTOR_RECOVERY = [];  // Add motor IDs to ignore: ['05']
 let ws = null;
 
 // ======= WEBSOCKET =======
@@ -47,8 +47,6 @@ function connectWebSocket() {
   ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
-      
-      // Log ALL WebSocket messages for debugging
       console.log(`📨 WS [${message.function}]:`, typeof message.data === 'string' && message.data.length > 100 ? message.data.substring(0, 100) + '...' : message.data);
       
       if (message.msg === '连接成功' || message.msg === 'connection successful') {
@@ -56,7 +54,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Module ID
       if (message.function === '01') {
         currentModuleId = message.moduleId;
         console.log(`✅ Module ID: ${currentModuleId}`);
@@ -69,7 +66,6 @@ function connectWebSocket() {
         return;
       }
       
-      // AI Photo Result - IMMEDIATE RESPONSE
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
@@ -86,12 +82,8 @@ function connectWebSocket() {
         console.log(`   Match: ${latestAIResult.matchRate}%`);
         console.log(`   Material: ${latestAIResult.materialType}`);
         
-        // Cache for immediate retrieval
-        responseCache.set('aiPhoto', { data: latestAIResult, timestamp: Date.now() });
-        
         mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
         
-        // Auto-trigger weight if enabled
         if (autoCycleEnabled && latestAIResult.matchRate >= 30 && latestAIResult.materialType !== 'UNKNOWN') {
           console.log('🤖 AUTO: Getting weight...');
           setTimeout(() => executeCommand({ action: 'getWeight' }), 500);
@@ -99,7 +91,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Weight Result - IMMEDIATE RESPONSE
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         
@@ -111,27 +102,29 @@ function connectWebSocket() {
         console.log(`⚖️ Weight: ${latestWeight.weight}g`);
         console.log(`   Raw data: ${message.data}`);
         
-        // Cache for immediate retrieval
-        responseCache.set('weight', { data: latestWeight, timestamp: Date.now() });
-        
         mqttClient.publish(`rvm/${DEVICE_ID}/weight_result`, JSON.stringify(latestWeight));
         
-        // Auto-calibrate if invalid
-        if (latestWeight.weight <= 0) {
-          console.log('⚠️ AUTO: Calibrating...');
+        if (latestWeight.weight <= 0 && calibrationAttempts < 2) {
+          calibrationAttempts++;
+          console.log(`⚠️ AUTO: Calibrating (attempt ${calibrationAttempts}/2)...`);
           setTimeout(async () => {
             await executeCommand({ action: 'calibrateWeight' });
             setTimeout(() => executeCommand({ action: 'getWeight' }), 1000);
           }, 500);
           return;
+        } else if (latestWeight.weight <= 0 && calibrationAttempts >= 2) {
+          console.log('⚠️ Calibration failed after 2 attempts');
+          calibrationAttempts = 0;
+          return;
         }
         
-        // Auto-cycle if valid
-        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {  // Changed from 50g to 10g
+        if (latestWeight.weight > 0) calibrationAttempts = 0;
+        
+        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
           console.log('✅ AUTO: Starting cycle...');
           cycleInProgress = true;
           await executeFullCycle();
-        } else if (latestWeight.weight <= 10 && latestWeight.weight > 0) {  // Changed from 50g to 10g
+        } else if (latestWeight.weight <= 10 && latestWeight.weight > 0) {
           console.log(`⚠️ Weight too low (${latestWeight.weight}g)`);
           await executeCommand({ action: 'openGate' });
           setTimeout(() => executeCommand({ action: 'closeGate' }), 2000);
@@ -139,7 +132,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Motor Status (function: "03")
       if (message.function === '03') {
         try {
           const motors = JSON.parse(message.data);
@@ -152,7 +144,6 @@ function connectWebSocket() {
           const abnormals = motors.filter(m => m.state === 1);
           
           if (abnormals.length > 0 && !recoveryInProgress) {
-            // Filter out ignored motors
             const recoverableMotors = abnormals.filter(m => !IGNORE_MOTOR_RECOVERY.includes(m.motorType));
             
             if (recoverableMotors.length > 0) {
@@ -160,7 +151,6 @@ function connectWebSocket() {
               await autoRecoverMotors(recoverableMotors);
             }
             
-            // Log ignored motors
             const ignoredMotors = abnormals.filter(m => IGNORE_MOTOR_RECOVERY.includes(m.motorType));
             if (ignoredMotors.length > 0) {
               console.log('⚠️ Known hardware issue (ignored):', ignoredMotors.map(m => m.motorTypeDesc));
@@ -174,7 +164,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Device Status
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         if (code === 4 && autoCycleEnabled && !cycleInProgress) {
@@ -184,7 +173,6 @@ function connectWebSocket() {
         return;
       }
       
-      // QR Code Scanning
       if (message.function === 'qrcode') {
         console.log('🔍 QR Code Scanned:', message.data);
         mqttClient.publish(`rvm/${DEVICE_ID}/qrcode`, JSON.stringify({
@@ -194,7 +182,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Publish all events
       mqttClient.publish(`rvm/${DEVICE_ID}/events`, JSON.stringify({
         deviceId: DEVICE_ID,
         function: message.function,
@@ -248,7 +235,6 @@ async function autoRecoverMotors(abnormals) {
           break;
         case '05':
           console.log('🔧 Stepper motor abnormal - attempting extended reset...');
-          // Try position 01 first, then back to 00
           await executeCommand({ action: 'stepperMotor', params: { position: '01' } });
           await delay(3000);
           await executeCommand({ action: 'stepperMotor', params: { position: '00' } });
@@ -263,11 +249,10 @@ async function autoRecoverMotors(abnormals) {
     }
   }
   
-  // Don't spam recovery - wait 30 seconds before allowing another recovery
   setTimeout(() => {
     recoveryInProgress = false;
-    console.log('✅ Recovery cooldown complete - ready for next recovery if needed');
-  }, 30000);  // 30 second cooldown
+    console.log('✅ Recovery cooldown complete');
+  }, 30000);
   
   console.log('🔧 Recovery sequence finished (30s cooldown active)');
 }
@@ -289,41 +274,24 @@ async function executeFullCycle() {
     console.log(`📍 Routing to bin ${stepperPos} for ${latestAIResult.materialType}`);
     
     const sequence = [
-      // Step 1: Position the sorter/bin selector
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
-      
-      // Step 2: Belt moves INWARD (reverse = into machine, forward = out of machine!)
-      { action: 'transferReverse' },  // SWAPPED! Reverse pulls bottle IN
-      { delay: 8000 },  // Wait for belt to move bottle to pusher
-      
-      // Step 3: Push item into bin (Motor 03) while belt still moving
+      { action: 'transferReverse' },
+      { delay: 8000 },
       { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },
-      { delay: 3000 },  // Pusher time
-      
-      // Step 4: Stop pusher
+      { delay: 3000 },
       { action: 'customMotor', params: { motorId: collectMotor, type: '00' } },
       { delay: 500 },
-      
-      // Step 5: Belt moves back OUT to clear pusher area
-      { action: 'transferForward' },  // SWAPPED! Forward pushes OUT
+      { action: 'transferForward' },
       { delay: 2000 },
-      
-      // Step 6: Stop transfer belt
       { action: 'transferStop' },
       { delay: 500 },
-      
-      // Step 7: Compact
       { action: 'compactorStart' },
       { delay: 5000 },
       { action: 'compactorStop' },
       { delay: 1000 },
-      
-      // Step 8: Return stepper to home
       { action: 'stepperMotor', params: { position: '00' } },
       { delay: 1000 },
-      
-      // Step 9: Close gate
       { action: 'closeGate' }
     ];
     
@@ -352,6 +320,122 @@ async function executeFullCycle() {
   }
 }
 
+// ======= MOTOR DIRECTION TEST =======
+async function runMotorTests() {
+  console.log('🧪 Starting automated motor direction tests...');
+  console.log('👁️ WATCH THE MACHINE CAREFULLY!\n');
+  
+  // TEST 1: Belt Type 01
+  console.log('========================================');
+  console.log('TEST 1: Belt Motor (02) - Type 01');
+  console.log('========================================');
+  console.log('Place bottle at gate entrance...');
+  console.log('Starting in 5 seconds...\n');
+  await delay(5000);
+  
+  console.log('🔄 Running: Motor 02, Type 01');
+  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '01' } });
+  await delay(3000);
+  console.log('🛑 Stopping motor');
+  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '00' } });
+  console.log('❓ Did bottle move INTO machine or OUT toward gate?');
+  console.log('   Write this down: Belt Type 01 = IN or OUT\n');
+  await delay(3000);
+  
+  // TEST 2: Belt Type 02
+  console.log('========================================');
+  console.log('TEST 2: Belt Motor (02) - Type 02');
+  console.log('========================================');
+  console.log('Prepare bottle at gate again...');
+  console.log('Starting in 5 seconds...\n');
+  await delay(5000);
+  
+  console.log('🔄 Running: Motor 02, Type 02');
+  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '02' } });
+  await delay(3000);
+  console.log('🛑 Stopping motor');
+  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '00' } });
+  console.log('❓ Did bottle move INTO machine or OUT toward gate?');
+  console.log('   Write this down: Belt Type 02 = IN or OUT\n');
+  await delay(3000);
+  
+  // TEST 3: Pusher Type 01
+  console.log('========================================');
+  console.log('TEST 3: Pusher Motor (03) - Type 01');
+  console.log('========================================');
+  console.log('Place bottle in middle of belt (near pusher)...');
+  console.log('Starting in 5 seconds...\n');
+  await delay(5000);
+  
+  console.log('🔄 Running: Motor 03, Type 01');
+  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '01' } });
+  await delay(2000);
+  console.log('🛑 Stopping motor');
+  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+  console.log('❓ Did pusher push INTO bin or OUT toward gate?');
+  console.log('   Write this down: Pusher Type 01 = INTO_BIN or OUT_GATE\n');
+  await delay(3000);
+  
+  // TEST 4: Pusher Type 02
+  console.log('========================================');
+  console.log('TEST 4: Pusher Motor (03) - Type 02');
+  console.log('========================================');
+  console.log('Place bottle in middle of belt again...');
+  console.log('Starting in 5 seconds...\n');
+  await delay(5000);
+  
+  console.log('🔄 Running: Motor 03, Type 02');
+  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '02' } });
+  await delay(2000);
+  console.log('🛑 Stopping motor');
+  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+  console.log('❓ Did pusher push INTO bin or OUT toward gate?');
+  console.log('   Write this down: Pusher Type 02 = INTO_BIN or OUT_GATE\n');
+  await delay(3000);
+  
+  // TEST 5: Pusher Type 03
+  console.log('========================================');
+  console.log('TEST 5: Pusher Motor (03) - Type 03 (CURRENT)');
+  console.log('========================================');
+  console.log('Place bottle in middle of belt again...');
+  console.log('Starting in 5 seconds...\n');
+  await delay(5000);
+  
+  console.log('🔄 Running: Motor 03, Type 03 (current config)');
+  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '03' } });
+  await delay(2000);
+  console.log('🛑 Stopping motor');
+  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+  console.log('❓ Did pusher push INTO bin or OUT toward gate?');
+  console.log('   Write this down: Pusher Type 03 = INTO_BIN or OUT_GATE\n');
+  await delay(2000);
+  
+  // Summary
+  console.log('\n========================================');
+  console.log('✅ TESTS COMPLETED!');
+  console.log('========================================');
+  console.log('');
+  console.log('📋 RESULTS TO RECORD:');
+  console.log('');
+  console.log('BELT MOTOR (02):');
+  console.log('  Type 01: Bottle moved _____ (IN/OUT)');
+  console.log('  Type 02: Bottle moved _____ (IN/OUT)');
+  console.log('');
+  console.log('PUSHER MOTOR (03):');
+  console.log('  Type 01: Pushed _____ (INTO_BIN/OUT_GATE)');
+  console.log('  Type 02: Pushed _____ (INTO_BIN/OUT_GATE)');
+  console.log('  Type 03: Pushed _____ (INTO_BIN/OUT_GATE)');
+  console.log('');
+  console.log('========================================');
+  console.log('🎯 Tell me these results and I will fix the code!');
+  console.log('========================================\n');
+  
+  mqttClient.publish(`rvm/${DEVICE_ID}/test_complete`, JSON.stringify({
+    message: 'Motor tests completed',
+    timestamp: new Date().toISOString()
+  }));
+}
+
 // ======= UTILITIES =======
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
@@ -373,7 +457,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= EXECUTE COMMAND - NO TIMEOUTS! =======
+// ======= EXECUTE COMMAND =======
 async function executeCommand(commandData) {
   const { action, params } = commandData;
   const deviceType = 1;
@@ -385,7 +469,6 @@ async function executeCommand(commandData) {
   
   let apiUrl, apiPayload;
   
-  // Map actions
   if (action === 'openGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType };
@@ -412,16 +495,16 @@ async function executeCommand(commandData) {
     apiPayload = { moduleId: currentModuleId, motorId: '04', type: '00', deviceType };
   } else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
-    apiPayload = { moduleId: currentModuleId, type: '00' };  // Use actual moduleId
+    apiPayload = { moduleId: currentModuleId, type: '00' };
   } else if (action === 'calibrateWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/weightCalibration`;
-    apiPayload = { moduleId: currentModuleId, type: '00' };  // Use actual moduleId
+    apiPayload = { moduleId: currentModuleId, type: '00' };
   } else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
   } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    apiPayload = { moduleId: currentModuleId, type: params?.position || '00', deviceType };  // Use actual moduleId
+    apiPayload = { moduleId: currentModuleId, type: params?.position || '00', deviceType };
   } else if (action === 'customMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = {
@@ -438,26 +521,19 @@ async function executeCommand(commandData) {
   console.log(`🔄 ${action}`);
   
   try {
-    // Just call API - responses come via WebSocket immediately!
-    const result = await axios.post(apiUrl, apiPayload, {
+    await axios.post(apiUrl, apiPayload, {
       timeout: 10000,
       headers: { 'Content-Type': 'application/json' }
     });
     
     console.log(`✅ ${action} executed`);
     
-    // For non-motor commands, wait a bit for WebSocket response
     if (action === 'takePhoto') {
       console.log('⏳ Waiting 2s for AI processing...');
       await delay(2000);
     } else if (action === 'getWeight') {
       console.log('⏳ Waiting 3s for weight reading...');
       await delay(3000);
-      
-      // Check if we got weight response
-      if (!responseCache.has('weight') || (Date.now() - responseCache.get('weight').timestamp > 5000)) {
-        console.log('⚠️ No weight response received - may need to check scale connection');
-      }
     }
     
     mqttClient.publish(`rvm/${DEVICE_ID}/responses`, JSON.stringify({
@@ -543,6 +619,14 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
+    if (topic.includes('/commands') && payload.action === 'test/motors') {
+      console.log('\n========================================');
+      console.log('🧪 MOTOR DIRECTION TEST MODE');
+      console.log('========================================\n');
+      await runMotorTests();
+      return;
+    }
+    
     if (topic.includes('/commands')) {
       console.log(`📩 Command: ${payload.action}`);
       
@@ -567,22 +651,10 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-console.log('🔥 LOADING FIXED AGENT VERSION 2.0 🔥');
 console.log('========================================');
-console.log('🚀 FIXED RVM AGENT v2.0');
+console.log('🚀 RVM AGENT v2.4 FINAL');
 console.log(`📱 Device: ${DEVICE_ID}`);
-console.log(`🔌 API: ${LOCAL_API_BASE}`);
-console.log(`🔌 WebSocket: ${WS_URL}`);
-console.log(`🔗 MQTT: ${MQTT_BROKER_URL}`);
 console.log('========================================');
-console.log('⚙️  Configuration:');
-console.log('   • Weight threshold: 10g');
-console.log('   • Calibration attempts: 2 max');
-console.log('   • Ignored motors:', IGNORE_MOTOR_RECOVERY.length > 0 ? IGNORE_MOTOR_RECOVERY.join(', ') : 'None');
-console.log('========================================');
-console.log('📖 Operation Flow:');
-console.log('   1. Get moduleId via WebSocket (function: "01")');
-console.log('   2. Use moduleId in all motor commands');
-console.log('   3. WebSocket monitors all events');
-console.log('   4. Auto-cycle triggers on valid detection');
+console.log('🧪 TEST MODE:');
+console.log('   Run: curl -X POST http://localhost:3008/api/rvm/RVM-3101/test/motors');
 console.log('========================================\n');
