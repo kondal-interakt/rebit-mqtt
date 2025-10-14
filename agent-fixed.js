@@ -1,4 +1,25 @@
-// FIXED RVM Agent - No More Timeouts!
+console.log('🔥 LOADING FIXED AGENT VERSION 2.2 🔥');
+console.log('========================================');
+console.log('🚀 FIXED RVM AGENT v2.2 - Complete Belt Sequence');
+console.log(`📱 Device: ${DEVICE_ID}`);
+console.log(`🔌 API: ${LOCAL_API_BASE}`);
+console.log(`🔌 WebSocket: ${WS_URL}`);
+console.log(`🔗 MQTT: ${MQTT_BROKER_URL}`);
+console.log('========================================');
+console.log('⚙️  Configuration:');
+console.log('   • ModuleId: Dynamic from getModuleId API');
+console.log('   • Motor 02: Transfer belt (conveyor)');
+console.log('   • Motor 03: Pusher to bin');
+console.log('   • Weight threshold: 10g');
+console.log('   • Calibration attempts: 2 max');
+console.log('   • Ignored motors:', IGNORE_MOTOR_RECOVERY.length > 0 ? IGNORE_MOTOR_RECOVERY.join(', ') : 'None');
+console.log('========================================');
+console.log('📖 Operation Flow:');
+console.log('   1. Get moduleId from API (returns "09")');
+console.log('   2. Position stepper → belt forward → push → compact');
+console.log('   3. WebSocket monitors all events');
+console.log('   4. Auto-cycle triggers on valid detection');
+console.log('========================================\n');// FIXED RVM Agent - No More Timeouts!
 // Save this as agent-fixed.js and run: node agent-fixed.js
 
 const mqtt = require('mqtt');
@@ -27,6 +48,10 @@ let motorStatusCache = {};
 let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
+let calibrationAttempts = 0;  // Track calibration attempts
+
+// Ignore motors with known hardware issues (add motor IDs to skip recovery)
+const IGNORE_MOTOR_RECOVERY = [];  // Example: ['05'] to ignore stepper motor
 
 // Response handling - NO MORE TIMEOUTS!
 const responseCache = new Map();  // Cache responses by type
@@ -125,11 +150,11 @@ function connectWebSocket() {
         }
         
         // Auto-cycle if valid
-        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
+        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {  // Changed from 50g to 10g
           console.log('✅ AUTO: Starting cycle...');
           cycleInProgress = true;
           await executeFullCycle();
-        } else if (latestWeight.weight <= 50 && latestWeight.weight > 0) {
+        } else if (latestWeight.weight <= 10 && latestWeight.weight > 0) {  // Changed from 50g to 10g
           console.log(`⚠️ Weight too low (${latestWeight.weight}g)`);
           await executeCommand({ action: 'openGate' });
           setTimeout(() => executeCommand({ action: 'closeGate' }), 2000);
@@ -150,8 +175,19 @@ function connectWebSocket() {
           const abnormals = motors.filter(m => m.state === 1);
           
           if (abnormals.length > 0 && !recoveryInProgress) {
-            console.log('🚨 ABNORMAL:', abnormals.map(m => m.motorTypeDesc));
-            await autoRecoverMotors(abnormals);
+            // Filter out ignored motors
+            const recoverableMotors = abnormals.filter(m => !IGNORE_MOTOR_RECOVERY.includes(m.motorType));
+            
+            if (recoverableMotors.length > 0) {
+              console.log('🚨 ABNORMAL:', recoverableMotors.map(m => m.motorTypeDesc));
+              await autoRecoverMotors(recoverableMotors);
+            }
+            
+            // Log ignored motors
+            const ignoredMotors = abnormals.filter(m => IGNORE_MOTOR_RECOVERY.includes(m.motorType));
+            if (ignoredMotors.length > 0) {
+              console.log('⚠️ Known hardware issue (ignored):', ignoredMotors.map(m => m.motorTypeDesc));
+            }
           } else if (abnormals.length === 0) {
             console.log('✅ All motors normal');
           }
@@ -168,6 +204,16 @@ function connectWebSocket() {
           console.log('👤 AUTO: Object detected');
           setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
         }
+        return;
+      }
+      
+      // QR Code Scanning
+      if (message.function === 'qrcode') {
+        console.log('🔍 QR Code Scanned:', message.data);
+        mqttClient.publish(`rvm/${DEVICE_ID}/qrcode`, JSON.stringify({
+          data: message.data,
+          timestamp: new Date().toISOString()
+        }));
         return;
       }
       
@@ -255,42 +301,50 @@ async function executeFullCycle() {
   
   try {
     let stepperPos = '00';
-    let collectMotor = '02';  // Default to belt for transfer, override only for special collect
+    let collectMotor = '02';
     
     switch (latestAIResult.materialType) {
-      case 'PLASTIC_BOTTLE': stepperPos = '03'; collectMotor = '03'; break;  // Keep '03' for plastic-specific collect
+      case 'PLASTIC_BOTTLE': stepperPos = '03'; collectMotor = '03'; break;
       case 'METAL_CAN': stepperPos = '02'; collectMotor = '02'; break;
-      case 'GLASS': stepperPos = '03'; collectMotor = '02'; break;  // UPDATED: Route to plastic bin (doc lacks glass pos; share with plastic)
+      case 'GLASS': stepperPos = '01'; collectMotor = '02'; break;
     }
     
     console.log(`📍 Routing to bin ${stepperPos} for ${latestAIResult.materialType}`);
     
-    // TODO: Check bin full via deviceStatus (e.g., if code 0/1/3 for plastic/metal/glass, alert/reject)
-    
     const sequence = [
+      // Step 1: Position the sorter/bin selector
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
-      // Always run belt to push item toward bin
+      
+      // Step 2: Transfer belt moves forward to bring item to pusher (Motor 02)
       { action: 'transferForward' },
-      { delay: 2000 },  // Tune for belt speed to reach sorter limit
+      { delay: 3000 },  // Wait for belt to move item
+      
+      // Step 3: Stop transfer belt
       { action: 'transferStop' },
       { delay: 500 },
-      // Then material-specific collect (if different from belt)
-      ...(collectMotor === '03' ? [{ action: 'customMotor', params: { motorId: collectMotor, type: '03' } }] : []),
-      { delay: 1500 },
+      
+      // Step 4: Push item into bin (Motor 03)
+      { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },
+      { delay: 2000 },
+      
+      // Step 5: Stop pusher
+      { action: 'customMotor', params: { motorId: collectMotor, type: '00' } },
+      { delay: 500 },
+      
+      // Step 6: Compact
       { action: 'compactorStart' },
       { delay: 5000 },
       { action: 'compactorStop' },
       { delay: 1000 },
+      
+      // Step 7: Return stepper to home
       { action: 'stepperMotor', params: { position: '00' } },
       { delay: 1000 },
+      
+      // Step 8: Close gate
       { action: 'closeGate' }
     ];
-    
-    if (latestAIResult.materialType === 'GLASS') {
-      // OPTIONAL: Skip compactor for glass if hardware-specific (doc implies NONE for glass)
-      // Remove compactor steps above if confirmed
-    }
     
     await executeSequence(sequence);
     
@@ -314,7 +368,6 @@ async function executeFullCycle() {
     cycleInProgress = false;
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'closeGate' });
-    await executeCommand({ action: 'transferStop' });
   }
 }
 
@@ -533,7 +586,22 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
+console.log('🔥 LOADING FIXED AGENT VERSION 2.0 🔥');
 console.log('========================================');
 console.log('🚀 FIXED RVM AGENT v2.0');
 console.log(`📱 Device: ${DEVICE_ID}`);
+console.log(`🔌 API: ${LOCAL_API_BASE}`);
+console.log(`🔌 WebSocket: ${WS_URL}`);
+console.log(`🔗 MQTT: ${MQTT_BROKER_URL}`);
+console.log('========================================');
+console.log('⚙️  Configuration:');
+console.log('   • Weight threshold: 10g');
+console.log('   • Calibration attempts: 2 max');
+console.log('   • Ignored motors:', IGNORE_MOTOR_RECOVERY.length > 0 ? IGNORE_MOTOR_RECOVERY.join(', ') : 'None');
+console.log('========================================');
+console.log('📖 Operation Flow:');
+console.log('   1. Get moduleId via WebSocket (function: "01")');
+console.log('   2. Use moduleId in all motor commands');
+console.log('   3. WebSocket monitors all events');
+console.log('   4. Auto-cycle triggers on valid detection');
 console.log('========================================\n');
