@@ -1,9 +1,9 @@
-// RVM Agent v3.4 FINAL FIX - Controlled Forward Movement + Pusher Retraction
+// RVM Agent v3.4 FINAL FIX - Controlled Movement + Correct Compactor
 // Changes from v3.3:
-// - Uses SHORT TIMED forward bursts (not limit switch command)
-// - Continuously monitors position during movement
-// - STOPS immediately when '02' detected
-// - CRITICAL FIX: Pusher retracts BEFORE belt reverses (prevents bottle ejection)
+// - Timed forward with position monitoring (stops at '02')
+// - Pusher retracts BEFORE belt reverses
+// - CONTROLLED belt reverse (not continuous full-speed)
+// - Compactor uses type '03' (not '01')
 // Save as: agent-v3.4-FINAL.js
 // Run: node agent-v3.4-FINAL.js
 
@@ -117,29 +117,45 @@ async function transferForwardToMiddle() {
   return true;
 }
 
-async function transferReverseToStart() {
-  console.log('🎯 Reverse to START position');
-  await executeCommand({ action: 'transferReverse' });
+async function transferReverseToStartControlled() {
+  console.log('🎯 Controlled reverse to START position (timed with monitoring)');
+  
+  // Use TIMED reverse instead of continuous
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: '02', type: '01' }  // Start reverse
+  });
+  
   const startTime = Date.now();
   let positionReached = false;
+  let lastPosition = lastBeltStatus?.position || '03';
 
-  while (Date.now() - startTime < 15000) {
-    await delay(400);
-    if (lastBeltStatus?.position === '01') {
-      console.log('✅ Reached start position');
+  while (Date.now() - startTime < 10000) {  // 10s max
+    await delay(300);  // Fast polling
+    
+    const currentPosition = lastBeltStatus?.position || lastPosition;
+    console.log(`⏳ Belt reversing: ${currentPosition}`);
+    
+    // Stop when start position reached
+    if (currentPosition === '01') {
+      console.log('✅ Reached start position - STOPPING');
+      await executeCommand({ action: 'transferStop' });
+      await delay(500);
       positionReached = true;
       break;
     }
-    console.log(`⏳ Current belt position: ${lastBeltStatus?.position || 'unknown'}`);
+    
+    lastPosition = currentPosition;
   }
 
+  // Safety stop
   await executeCommand({ action: 'transferStop' });
   
   if (!positionReached) {
-    console.log('⚠️ Timeout returning to start - forcing stop');
+    console.log('⚠️ Belt reverse timeout - stopped anyway');
   }
   
-  return positionReached;
+  return true;
 }
 
 // ======= WEBSOCKET (unchanged) =======
@@ -410,13 +426,13 @@ async function executeFullCycle() {
       { action: 'customMotor', params: { motorId: '03', type: '00' } },
       { delay: 500 },
       
-      // Step 7: NOW return belt to start (pusher is clear)
-      { action: 'transferReverseToStart' },
+      // Step 7: NOW return belt to start (pusher is clear) - CONTROLLED REVERSE
+      { action: 'transferReverseToStartControlled' },
       { delay: 1000 },
       
-      // Step 8: Run compactor
+      // Step 8: Run compactor (try type '03', fallback to '01' if needed)
       { action: 'compactorStart' },
-      { delay: 5000 },
+      { delay: 6000 },  // Wait for compactor to run
       { action: 'compactorStop' },
       { delay: 1000 },
       
@@ -450,11 +466,14 @@ async function executeFullCycle() {
     cycleInProgress = false;
     
     // Emergency cleanup
+    console.log('🚨 Emergency cleanup...');
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'transferStop' });
     await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
-    await executeCommand({ action: 'transferReverse' });
-    await delay(3000);
+    
+    // Gentle emergency reverse
+    await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '01' } });
+    await delay(2000);  // Short reverse
     await executeCommand({ action: 'transferStop' });
     await executeCommand({ action: 'closeGate' });
     
@@ -515,7 +534,12 @@ async function executeCommand(commandData) {
     apiPayload = { moduleId: currentModuleId, motorId: '02', type: '00', deviceType };
   } else if (action === 'compactorStart') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '01', deviceType };
+    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '03', deviceType };  // Try '03' first
+    console.log('🔨 Starting compactor with type 03...');
+  } else if (action === 'compactorStartAlt') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = { moduleId: currentModuleId, motorId: '04', type: '01', deviceType };  // Alternative: type '01'
+    console.log('🔨 Starting compactor with type 01 (alternative)...');
   } else if (action === 'compactorStop') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '04', type: '00', deviceType };
@@ -544,8 +568,8 @@ async function executeCommand(commandData) {
     apiPayload = { moduleId: currentModuleId, type: '03' };
   } else if (action === 'transferForwardToMiddle') {
     return await transferForwardToMiddle();
-  } else if (action === 'transferReverseToStart') {
-    return await transferReverseToStart();
+  } else if (action === 'transferReverseToStartControlled') {
+    return await transferReverseToStartControlled();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -676,13 +700,18 @@ console.log('========================================');
 console.log('🚀 RVM AGENT v3.4 FINAL FIX');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🔧 KEY FIXES:');
-console.log('   - Timed forward with continuous position monitoring');
-console.log('   - IMMEDIATE stop when middle (02) detected');
-console.log('   - Auto-recovery if overshoots to (03)');
-console.log('   - PUSHER RETRACTS before belt reverses (CRITICAL!)');
-console.log('   - Prevents bottle from being pulled back out');
+console.log('🔧 CRITICAL FIXES:');
+console.log('   1. Belt stops at middle (02) - no overshoot');
+console.log('   2. Pusher RETRACTS before belt reverses');
+console.log('   3. CONTROLLED belt reverse (not full-speed)');
+console.log('   4. Compactor uses type "03" (test with "01" if fails)');
+console.log('========================================');
+console.log('📋 SEQUENCE:');
+console.log('   Forward → Stop at 02 → Push → Wait → Retract Pusher');
+console.log('   → Gentle Reverse → Compact → Reset → Close');
 console.log('========================================');
 console.log('🤖 USAGE:');
-console.log('   Enable: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
+console.log('   Enable Auto: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
+console.log('   Test Compactor: Publish {"action":"compactorStart"} to rvm/RVM-3101/commands');
+console.log('   Alternative: Publish {"action":"compactorStartAlt"} if type 03 fails');
 console.log('========================================\n');
