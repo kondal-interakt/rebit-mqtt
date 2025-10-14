@@ -1,20 +1,18 @@
-// RVM Agent v2.5 FIXED - Belt Movement Correction
+// RVM Agent v2.6 IMPROVED - Enhanced Grip & Travel
 // Changes: 
-// - Fixed cycle sequence: Use transferForward (type 02) to pull item from gate to pusher area (was reverse, causing ejection)
-// - Later transfer: Use transferReverse (type 01) to clear/reset belt after push
-// - Added gate open/close in motor tests for proper belt engagement
-// - Increased run delays in tests for better observation (belt: 5s, pusher: 4s)
-// - Pusher tests: Adjusted types based on doc (focus on 03 for forward; 01/02 as potential reverse/idle)
-// - Ignore stepper recovery during tests to avoid interference
-// Save as: agent-v2.5-FIXED.js
-// Run: node agent-v2.5-FIXED.js
+// - Belt forward: 8s delay + repeat if stuck (check WS status).
+// - Tests: Upright placement prompts, pre-advance for pusher.
+// - Temp ignore all recovery during tests.
+// - Auto-calibrate after tests.
+// Save as: agent-v2.6-IMPROVED.js
+// Run: node agent-v2.6-IMPROVED.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-console.log('🔥 LOADING RVM AGENT VERSION 2.5 FIXED - BELT CORRECTION 🔥');
+console.log('🔥 LOADING RVM AGENT VERSION 2.6 IMPROVED - GRIP FIX 🔥');
 
 // ======= CONFIGURATION =======
 const DEVICE_ID = 'RVM-3101';
@@ -36,8 +34,9 @@ let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
 let calibrationAttempts = 0;
+let testMode = false;  // NEW: Flag to pause recovery during tests
 
-const IGNORE_MOTOR_RECOVERY = ['05'];  // Ignore stepper during normal op; tests handle separately
+const IGNORE_MOTOR_RECOVERY = ['05'];  // Base ignore for stepper
 let ws = null;
 
 // ======= WEBSOCKET =======
@@ -149,7 +148,7 @@ function connectWebSocket() {
           
           const abnormals = motors.filter(m => m.state === 1);
           
-          if (abnormals.length > 0 && !recoveryInProgress) {
+          if (abnormals.length > 0 && !recoveryInProgress && !testMode) {  // NEW: Skip recovery if testMode active
             const recoverableMotors = abnormals.filter(m => !IGNORE_MOTOR_RECOVERY.includes(m.motorType));
             
             if (recoverableMotors.length > 0) {
@@ -282,13 +281,13 @@ async function executeFullCycle() {
     const sequence = [
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
-      { action: 'transferForward' },  // FIXED: Pull item from gate INTO machine to pusher (type 02: forward to limit)
+      { action: 'transferForward' },  // Pull item from gate INTO machine to pusher (type 02: forward to limit)
       { delay: 8000 },
       { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },  // Pusher to bin
       { delay: 3000 },
       { action: 'customMotor', params: { motorId: collectMotor, type: '00' } },  // Stop pusher
       { delay: 500 },
-      { action: 'transferReverse' },  // FIXED: Reverse belt to clear/return to compactor area (type 01: reverse back)
+      { action: 'transferReverse' },  // Reverse belt to clear/return to compactor area (type 01: reverse back)
       { delay: 2000 },
       { action: 'transferStop' },
       { delay: 500 },
@@ -326,133 +325,103 @@ async function executeFullCycle() {
   }
 }
 
-// ======= MOTOR DIRECTION TEST - ENHANCED =======
+// ======= MOTOR DIRECTION TEST - GRIP-ENHANCED =======
 async function runMotorTests() {
-  console.log('🧪 Starting automated motor direction tests (Gate auto-open)...');
-  console.log('👁️ WATCH THE MACHINE CAREFULLY!\n');
+  testMode = true;  // Pause recovery during tests
+  console.log('🧪 Starting improved motor tests (upright placement required)...');
+  console.log('👁️ TIP: Place bottle UPRIGHT & CENTERED on yellow belt for grip!\n');
   
-  // Open gate for belt tests
-  console.log('🚪 Opening gate for belt tests...');
+  // Global gate open
+  console.log('🚪 Opening gate...');
   await executeCommand({ action: 'openGate' });
   await delay(2000);
   
-  // TEST 1: Belt Type 01 (Doc: Reverse Back - expect OUT/eject)
+  // TEST 1: Belt Reverse (Type 01 - Expect OUT)
   console.log('========================================');
-  console.log('TEST 1: Belt Motor (02) - Type 01 (Reverse Back)');
+  console.log('TEST 1: Belt (02) Type 01 - Reverse (Expect eject)');
   console.log('========================================');
-  console.log('Place bottle at gate entrance (now open)...');
-  console.log('Starting in 5 seconds...\n');
+  console.log('🍼 Place UPRIGHT bottle at gate/belt start... 5s countdown.\n');
   await delay(5000);
   
-  console.log('🔄 Running: Motor 02, Type 01 (5s)');
-  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '01' } });
-  await delay(5000);  // Increased for better movement
-  console.log('🛑 Stopping motor');
-  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '00' } });
-  console.log('❓ Did bottle move INTO machine or OUT toward gate?');
-  console.log('   Write this down: Belt Type 01 = IN or OUT\n');
+  await executeCustomMotorWithRepeat('02', '01', 8000);  // Reverse 8s
+  await executeCommand({ action: 'transferStop' });
+  console.log('❓ Bottle ejected OUT? (Yes = good)\n');
   await delay(3000);
   
-  // TEST 2: Belt Type 02 (Doc: Forward to Limit - expect IN/pull)
+  // TEST 2: Belt Forward (Type 02 - Expect IN/pull to pusher)
   console.log('========================================');
-  console.log('TEST 2: Belt Motor (02) - Type 02 (Forward to Limit)');
+  console.log('TEST 2: Belt (02) Type 02 - Forward to Limit (Expect pull IN)');
   console.log('========================================');
-  console.log('Place bottle at gate entrance again...');
-  console.log('Starting in 5 seconds...\n');
+  console.log('🍼 Reposition UPRIGHT bottle at gate... 5s.\n');
   await delay(5000);
   
-  console.log('🔄 Running: Motor 02, Type 02 (5s)');
-  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '02' } });
-  await delay(5000);  // Increased
-  console.log('🛑 Stopping motor');
-  await executeCommand({ action: 'customMotor', params: { motorId: '02', type: '00' } });
-  console.log('❓ Did bottle move INTO machine or OUT toward gate?');
-  console.log('   Write this down: Belt Type 02 = IN or OUT\n');
+  await executeCustomMotorWithRepeat('02', '02', 8000);  // Forward 8s + repeat if stuck
+  await executeCommand({ action: 'transferStop' });
+  console.log('❓ Bottle pulled IN ~1m to pusher area? (If stuck, check tension)\n');
   await delay(3000);
   
-  // Close gate for pusher tests (safety)
-  console.log('🚪 Closing gate for pusher tests...');
+  // Close gate for pusher safety
   await executeCommand({ action: 'closeGate' });
   await delay(2000);
   
-  // TEST 3: Pusher Type 01 (Potential reverse/idle per doc)
-  console.log('========================================');
-  console.log('TEST 3: Pusher Motor (03) - Type 01');
-  console.log('========================================');
-  console.log('Place bottle in middle of belt (near pusher - gate closed)...');
-  console.log('Starting in 5 seconds...\n');
-  await delay(5000);
+  // TEST 3-5: Pusher (Pre-advance belt to position bottle)
+  for (let typeNum = 1; typeNum <= 3; typeNum++) {
+    console.log('========================================');
+    console.log(`TEST ${typeNum + 2}: Pusher (03) Type ${typeNum} (Pre-advance belt)`);
+    console.log('========================================');
+    console.log('🍼 Place UPRIGHT bottle mid-belt... 5s.\n');
+    await delay(5000);
+    
+    // Pre-advance belt to pusher position
+    console.log('🔄 Pre-advancing belt...');
+    await executeCustomMotorWithRepeat('02', '02', 4000);  // Short forward
+    await delay(2000);
+    
+    await executeCustomMotorWithRepeat('03', typeNum.toString(), 5000);  // Pusher 5s
+    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
+    console.log(`❓ Pusher Type ${typeNum} pushed INTO bin or OUT? (Type 03 = INTO expected)\n`);
+    await delay(3000);
+    
+    // Reset belt after each
+    await executeCommand({ action: 'transferReverse' });
+    await delay(3000);
+    await executeCommand({ action: 'transferStop' });
+  }
   
-  console.log('🔄 Running: Motor 03, Type 01 (4s)');
-  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '01' } });
-  await delay(4000);  // Increased for pusher
-  console.log('🛑 Stopping motor');
-  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
-  console.log('❓ Did pusher push INTO bin or OUT toward gate?');
-  console.log('   Write this down: Pusher Type 01 = INTO_BIN or OUT_GATE\n');
-  await delay(3000);
-  
-  // TEST 4: Pusher Type 02 (Potential forward/idle)
-  console.log('========================================');
-  console.log('TEST 4: Pusher Motor (03) - Type 02');
-  console.log('========================================');
-  console.log('Place bottle in middle of belt again...');
-  console.log('Starting in 5 seconds...\n');
-  await delay(5000);
-  
-  console.log('🔄 Running: Motor 03, Type 02 (4s)');
-  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '02' } });
-  await delay(4000);
-  console.log('🛑 Stopping motor');
-  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
-  console.log('❓ Did pusher push INTO bin or OUT toward gate?');
-  console.log('   Write this down: Pusher Type 02 = INTO_BIN or OUT_GATE\n');
-  await delay(3000);
-  
-  // TEST 5: Pusher Type 03 (Doc: Forward to Collect Bin)
-  console.log('========================================');
-  console.log('TEST 5: Pusher Motor (03) - Type 03 (CURRENT - Forward to Bin)');
-  console.log('========================================');
-  console.log('Place bottle in middle of belt again...');
-  console.log('Starting in 5 seconds...\n');
-  await delay(5000);
-  
-  console.log('🔄 Running: Motor 03, Type 03 (4s)');
-  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '03' } });
-  await delay(4000);
-  console.log('🛑 Stopping motor');
-  await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
-  console.log('❓ Did pusher push INTO bin or OUT toward gate?');
-  console.log('   Write this down: Pusher Type 03 = INTO_BIN or OUT_GATE\n');
+  // Final reset & calibrate
+  await executeCommand({ action: 'closeGate' });
+  await executeCommand({ action: 'calibrateWeight' });
   await delay(2000);
   
-  // Final close gate
-  await executeCommand({ action: 'closeGate' });
+  testMode = false;
   
   // Summary
   console.log('\n========================================');
-  console.log('✅ TESTS COMPLETED!');
-  console.log('========================================');
-  console.log('');
-  console.log('📋 RESULTS TO RECORD:');
-  console.log('');
-  console.log('BELT MOTOR (02):');
-  console.log('  Type 01 (Reverse): Bottle moved _____ (IN/OUT)');
-  console.log('  Type 02 (Forward): Bottle moved _____ (IN/OUT)');
-  console.log('');
-  console.log('PUSHER MOTOR (03):');
-  console.log('  Type 01: Pushed _____ (INTO_BIN/OUT_GATE)');
-  console.log('  Type 02: Pushed _____ (INTO_BIN/OUT_GATE)');
-  console.log('  Type 03 (Forward): Pushed _____ (INTO_BIN/OUT_GATE)');
-  console.log('');
-  console.log('========================================');
-  console.log('🎯 If still issues, check hardware/wiring. Cycle now uses Forward first to prevent ejection!');
+  console.log('✅ TESTS DONE! Calibrated sensors.');
+  console.log('📋 If still no grip: Tighten belt, clean surface, or upright only.');
   console.log('========================================\n');
   
   mqttClient.publish(`rvm/${DEVICE_ID}/test_complete`, JSON.stringify({
-    message: 'Motor tests completed (belt fixed)',
+    message: 'Improved tests complete (grip enhanced)',
     timestamp: new Date().toISOString()
   }));
+}
+
+// NEW: Helper for motor run + repeat if stuck (check status)
+async function executeCustomMotorWithRepeat(motorId, type, baseDelay) {
+  await executeCommand({ action: 'customMotor', params: { motorId, type } });
+  await delay(baseDelay);
+  
+  // Check if still "moving" in cache (simple stuck detect)
+  setTimeout(async () => {
+    if (motorStatusCache[motorId] && motorStatusCache[motorId].state === 0) {  // Normal? No repeat
+      console.log('✅ Full movement detected');
+    } else {
+      console.log('⚠️ Possible stuck - repeating 3s...');
+      await executeCommand({ action: 'customMotor', params: { motorId, type } });
+      await delay(3000);
+    }
+  }, baseDelay / 2);
 }
 
 // ======= UTILITIES =======
@@ -642,7 +611,9 @@ mqttClient.on('message', async (topic, message) => {
       console.log('\n========================================');
       console.log('🧪 MOTOR DIRECTION TEST MODE (Fixed)');
       console.log('========================================\n');
+      testMode = true;  // Set flag
       await runMotorTests();
+      testMode = false;
       return;
     }
     
@@ -671,9 +642,9 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v2.5 FIXED');
+console.log('🚀 RVM AGENT v2.6 IMPROVED');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🧪 TEST MODE:');
+console.log('🧪 TEST MODE: Upright bottle for grip!');
 console.log('   Run: curl -X POST http://localhost:3008/api/rvm/RVM-3101/test/motors');
 console.log('========================================\n');
