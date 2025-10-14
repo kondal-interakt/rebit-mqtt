@@ -1,9 +1,9 @@
-// RVM Agent v3.4 FINAL FIX - Controlled Forward Movement
+// RVM Agent v3.4 FINAL FIX - Controlled Forward Movement + Pusher Retraction
 // Changes from v3.3:
 // - Uses SHORT TIMED forward bursts (not limit switch command)
 // - Continuously monitors position during movement
 // - STOPS immediately when '02' detected
-// - No overshoot to '03'
+// - CRITICAL FIX: Pusher retracts BEFORE belt reverses (prevents bottle ejection)
 // Save as: agent-v3.4-FINAL.js
 // Run: node agent-v3.4-FINAL.js
 
@@ -140,48 +140,6 @@ async function transferReverseToStart() {
   }
   
   return positionReached;
-}
-
-async function verifyEjectionAndHold() {
-  console.log('🔍 Verifying bottle ejection with belt hold...');
-  const startTime = Date.now();
-  let ejected = false;
-  let beltMoved = false;
-
-  while (Date.now() - startTime < 10000) {
-    await delay(500);
-    
-    // Check belt position - if it moved from '02', re-align
-    if (lastBeltStatus?.position !== '02') {
-      if (!beltMoved) {
-        console.log(`⚠️ Belt moved during push: ${lastBeltStatus?.position} - holding position`);
-        beltMoved = true;
-      }
-      // Don't try to move it back during push, just note it
-    }
-
-    // Check pusher reached end position ('03')
-    if (lastPusherStatus?.position === '03') {
-      console.log('✅ Pusher reached end - bottle ejected');
-      
-      // Give extra time for bottle to fully drop
-      console.log('⏳ Waiting 2s for bottle to fully release...');
-      await delay(2000);
-      
-      ejected = true;
-      break;
-    }
-    
-    console.log(`⏳ Pusher position: ${lastPusherStatus?.position || 'unknown'}`);
-  }
-
-  if (!ejected) {
-    console.log('⚠️ Ejection verification timeout - assuming bottle dropped');
-    // Still wait a bit for gravity
-    await delay(2000);
-  }
-  
-  return true;  // Continue cycle even if verification unclear
 }
 
 // ======= WEBSOCKET (unchanged) =======
@@ -437,32 +395,36 @@ async function executeFullCycle() {
       { action: 'transferForwardToMiddle' },
       { delay: 1000 },
       
-      // Step 3: Push bottle into bin
+      // Step 3: Push bottle into bin (pusher extends to '03')
       { action: 'customMotor', params: { motorId: '03', type: '03' } },
       { delay: latestAIResult.materialType === 'PLASTIC_BOTTLE' ? 5000 : 3500 },
       
-      // Step 4: Verify push completed with hold
-      { action: 'verifyEjectionAndHold' },
+      // Step 4: Wait for bottle to drop
+      { delay: 2000 },
       
-      // Step 5: Stop pusher
+      // Step 5: RETRACT PUSHER FIRST (back to start position '01')
+      { action: 'customMotor', params: { motorId: '03', type: '01' } },
+      { delay: 3000 },  // Wait for pusher to fully retract
+      
+      // Step 6: Stop pusher
       { action: 'customMotor', params: { motorId: '03', type: '00' } },
-      { delay: 1000 },
+      { delay: 500 },
       
-      // Step 6: Return belt to start
+      // Step 7: NOW return belt to start (pusher is clear)
       { action: 'transferReverseToStart' },
       { delay: 1000 },
       
-      // Step 7: Run compactor
+      // Step 8: Run compactor
       { action: 'compactorStart' },
       { delay: 5000 },
       { action: 'compactorStop' },
       { delay: 1000 },
       
-      // Step 8: Reset stepper
+      // Step 9: Reset stepper
       { action: 'stepperMotor', params: { position: '00' } },
       { delay: 2000 },
       
-      // Step 9: Close gate
+      // Step 10: Close gate
       { action: 'closeGate' }
     ];
     
@@ -584,8 +546,6 @@ async function executeCommand(commandData) {
     return await transferForwardToMiddle();
   } else if (action === 'transferReverseToStart') {
     return await transferReverseToStart();
-  } else if (action === 'verifyEjectionAndHold') {
-    return await verifyEjectionAndHold();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -720,8 +680,8 @@ console.log('🔧 KEY FIXES:');
 console.log('   - Timed forward with continuous position monitoring');
 console.log('   - IMMEDIATE stop when middle (02) detected');
 console.log('   - Auto-recovery if overshoots to (03)');
-console.log('   - Extra wait after push for bottle release');
-console.log('   - No belt adjustments during active push');
+console.log('   - PUSHER RETRACTS before belt reverses (CRITICAL!)');
+console.log('   - Prevents bottle from being pulled back out');
 console.log('========================================');
 console.log('🤖 USAGE:');
 console.log('   Enable: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
