@@ -1,9 +1,21 @@
-// RVM Agent v3.6 - MATCHES ACTUAL MACHINE CONFIGURATION
+// RVM Agent v3.6 - MATCHES ACTUAL MACHINE CONFIGURATION + SAFE OPERATIONS
 // Based on machine config screen analysis:
 // - Transfer motor: CW direction
 // - Press plate (pusher) motor: CCW  
 // - Separate compactors for plastic vs cans
 // - Transfer timeout: 5000ms
+// 
+// CRITICAL FIXES:
+// 1. Safe gate opening - Retracts press plate & stops belt BEFORE opening
+// 2. Safe photo capture - Stops ALL motors BEFORE taking photo
+//    → Prevents bottle ejection when hitting camera/capture API
+// 
+// USAGE:
+// 1. Enable auto: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable
+// 2. Place bottle (gate opens safely, bottle stays in place)
+// 3. Capture: curl -X POST http://localhost:3008/api/rvm/RVM-3101/camera/capture
+// 4. Bottle remains in place during photo, then processes normally
+//
 // Save as: agent-v3.6-config-match.js
 // Run: node agent-v3.6-config-match.js
 
@@ -46,6 +58,82 @@ let ws = null;
 let lastBeltStatus = null;
 let lastPusherStatus = null;
 
+// ======= SAFE CAMERA CAPTURE - NO MOTOR MOVEMENT =======
+async function safeTakePhoto() {
+  console.log('📸 Safe photo capture...');
+  
+  // CRITICAL: Ensure ALL motors are STOPPED before photo
+  console.log('   Stopping all motors...');
+  
+  // Stop press plate (ensure UP/retracted)
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' } // UP
+  });
+  await delay(1500);
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } // STOP
+  });
+  await delay(300);
+  
+  // Stop belt
+  await executeCommand({ action: 'transferStop' });
+  await delay(300);
+  
+  // Stop gate
+  await executeCommand({ action: 'gateMotorStop' });
+  await delay(300);
+  
+  // NOW take photo
+  console.log('   Taking photo...');
+  await executeCommand({ action: 'takePhoto' });
+  
+  console.log('✅ Photo captured safely');
+}
+
+// ======= SAFE GATE OPENING - ENSURE NO EJECTION =======
+async function safeOpenGate() {
+  console.log('🚪 Safe gate opening sequence...');
+  
+  // Step 1: Ensure press plate is UP (retracted) first!
+  console.log('   Retracting press plate...');
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '01' } // UP/Reverse
+  });
+  await delay(2000);
+  
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: MOTOR_CONFIG.PRESS_PLATE, type: '00' } // STOP
+  });
+  await delay(500);
+  
+  // Step 2: Ensure belt is stopped and at start
+  console.log('   Ensuring belt at start...');
+  await ensureBeltAtStart();
+  await delay(500);
+  
+  // Step 3: NOW open gate
+  console.log('   Opening gate...');
+  await executeCommand({ action: 'openGate' });
+  await delay(1000);
+  
+  // Step 4: Stop gate motor (important!)
+  await executeCommand({ action: 'gateMotorStop' });
+  
+  console.log('✅ Gate open safely - ready for bottle');
+}
+
+async function safeCloseGate() {
+  console.log('🚪 Closing gate...');
+  await executeCommand({ action: 'closeGate' });
+  await delay(1000);
+  await executeCommand({ action: 'gateMotorStop' });
+  console.log('✅ Gate closed');
+}
+
 // ======= BELT CONTROL =======
 async function ensureBeltAtStart() {
   console.log('🔍 Ensuring belt at start...');
@@ -76,6 +164,34 @@ async function ensureBeltAtStart() {
   await executeCommand({ action: 'transferStop' });
   return true;
 }
+  console.log('🔍 Ensuring belt at start...');
+  const currentPos = lastBeltStatus?.position || '00';
+  
+  if (currentPos === '01') {
+    console.log('✅ Belt at start');
+    return true;
+  }
+  
+  console.log(`   Moving from ${currentPos} to start...`);
+  // Use reverse (type '01') to go to start
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: MOTOR_CONFIG.TRANSFER, type: '01' } 
+  });
+  
+  const startTime = Date.now();
+  while (Date.now() - startTime < 10000) {
+    await delay(400);
+    if (lastBeltStatus?.position === '01') {
+      await executeCommand({ action: 'transferStop' });
+      console.log('✅ Belt at start');
+      return true;
+    }
+  }
+  
+  await executeCommand({ action: 'transferStop' });
+  return true;
+
 
 async function moveToMiddlePosition() {
   console.log('🎯 Moving to middle position...');
@@ -272,8 +388,8 @@ async function executeFullCycle() {
     });
     await delay(2000);
     
-    // Step 7: Close gate
-    await executeCommand({ action: 'closeGate' });
+    // Step 7: Close gate safely
+    await safeCloseGate();
     
     console.log('✅ Cycle complete!\n');
     
@@ -302,7 +418,7 @@ async function executeFullCycle() {
       action: 'customMotor', 
       params: { motorId: MOTOR_CONFIG.PLASTIC_COMPACTOR, type: '00' } 
     });
-    await executeCommand({ action: 'closeGate' });
+    await safeCloseGate();
   }
 }
 
@@ -381,8 +497,14 @@ function connectWebSocket() {
           await executeFullCycle();
         } else if (latestWeight.weight <= 10 && latestWeight.weight > 0) {
           console.log(`⚠️ Too light (${latestWeight.weight}g) - rejecting`);
+          // Reject by opening and closing gate (bottle falls back out)
           await executeCommand({ action: 'openGate' });
-          setTimeout(() => executeCommand({ action: 'closeGate' }), 2000);
+          await delay(1000);
+          await executeCommand({ action: 'gateMotorStop' });
+          await delay(1000);
+          await executeCommand({ action: 'closeGate' });
+          await delay(1000);
+          await executeCommand({ action: 'gateMotorStop' });
         }
         return;
       }
@@ -413,7 +535,9 @@ function connectWebSocket() {
         const code = parseInt(message.data) || -1;
         if (code === 4 && autoCycleEnabled && !cycleInProgress) {
           console.log('👤 Object detected');
-          setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
+          setTimeout(async () => {
+            await safeTakePhoto();
+          }, 1000);
         }
         return;
       }
@@ -522,6 +646,9 @@ async function executeCommand(commandData) {
   } else if (action === 'closeGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType };
+  } else if (action === 'gateMotorStop') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType };
   } else if (action === 'transferStop') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: MOTOR_CONFIG.TRANSFER, type: '00', deviceType };
@@ -534,6 +661,8 @@ async function executeCommand(commandData) {
   } else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
+  } else if (action === 'safeTakePhoto') {
+    return await safeTakePhoto();
   } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
     apiPayload = { moduleId: currentModuleId, type: params?.position || '00', deviceType };
@@ -548,6 +677,10 @@ async function executeCommand(commandData) {
   } else if (action === 'getMotorStatus') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getModuleStatus`;
     apiPayload = { moduleId: currentModuleId, type: '03' };
+  } else if (action === 'safeOpenGate') {
+    return await safeOpenGate();
+  } else if (action === 'safeCloseGate') {
+    return await safeCloseGate();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -609,15 +742,21 @@ mqttClient.on('message', async (topic, message) => {
       console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ON' : 'OFF'}`);
       
       if (autoCycleEnabled && currentModuleId) {
-        await executeCommand({ action: 'openGate' });
+        await executeCommand({ action: 'safeOpenGate' });
       } else if (!autoCycleEnabled && currentModuleId) {
-        await executeCommand({ action: 'closeGate' });
+        await executeCommand({ action: 'safeCloseGate' });
       }
       return;
     }
     
     if (topic.includes('/commands')) {
       console.log(`📩 Command: ${payload.action}`);
+      
+      // Intercept takePhoto command and use safe version
+      if (payload.action === 'takePhoto') {
+        console.log('⚠️ Intercepting takePhoto - using safe version');
+        payload.action = 'safeTakePhoto';
+      }
       
       if (!currentModuleId) {
         pendingCommands.set(Date.now().toString(), payload);
