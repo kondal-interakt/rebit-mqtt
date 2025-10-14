@@ -1,26 +1,4 @@
-console.log('🔥 LOADING FIXED AGENT VERSION 2.2 🔥');
-console.log('========================================');
-console.log('🚀 FIXED RVM AGENT v2.2 - Complete Belt Sequence');
-console.log(`📱 Device: ${DEVICE_ID}`);
-console.log(`🔌 API: ${LOCAL_API_BASE}`);
-console.log(`🔌 WebSocket: ${WS_URL}`);
-console.log(`🔗 MQTT: ${MQTT_BROKER_URL}`);
-console.log('========================================');
-console.log('⚙️  Configuration:');
-console.log('   • ModuleId: Dynamic from getModuleId API');
-console.log('   • Motor 02: Transfer belt (conveyor)');
-console.log('   • Motor 03: Pusher to bin');
-console.log('   • Weight threshold: 10g');
-console.log('   • Calibration attempts: 2 max');
-console.log('   • Ignored motors:', IGNORE_MOTOR_RECOVERY.length > 0 ? IGNORE_MOTOR_RECOVERY.join(', ') : 'None');
-console.log('========================================');
-console.log('📖 Operation Flow:');
-console.log('   1. Get moduleId from API (returns "09")');
-console.log('   2. Position stepper → belt forward → push → compact');
-console.log('   3. WebSocket monitors all events');
-console.log('   4. Auto-cycle triggers on valid detection');
-console.log('========================================\n');// FIXED RVM Agent - No More Timeouts!
-// Save this as agent-fixed.js and run: node agent-fixed.js
+
 
 const mqtt = require('mqtt');
 const axios = require('axios');
