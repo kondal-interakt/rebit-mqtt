@@ -1,18 +1,17 @@
-// RVM Agent v2.9 ENHANCED BELT CONTROL - Full Transport
+// RVM Agent v3.0 PRODUCTION - Enhanced Belt Control
 // Changes: 
-// - Enhanced belt control with continuous + pulsed fallback
-// - Direct forward-to-limit command usage
-// - Position monitoring and timeout handling
-// - Better error recovery and status tracking
-// Save as: agent-v2.9-ENHANCED-BELT.js
-// Run: node agent-v2.9-ENHANCED-BELT.js
+// - Removed motor test scripts
+// - Fixed bottle throwing outside issue
+// - Enhanced belt control with better positioning
+// Save as: agent-v3.0-PRODUCTION.js
+// Run: node agent-v3.0-PRODUCTION.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-console.log('🔥 LOADING RVM AGENT VERSION 2.9 ENHANCED BELT CONTROL 🔥');
+console.log('🔥 LOADING RVM AGENT VERSION 3.0 PRODUCTION 🔥');
 
 // ======= CONFIGURATION =======
 const DEVICE_ID = 'RVM-3101';
@@ -34,52 +33,14 @@ let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
 let calibrationAttempts = 0;
-let testMode = false;
 
 const IGNORE_MOTOR_RECOVERY = ['05'];
 let ws = null;
 let lastBeltStatus = null;  // Track belt motor status
 
 // ======= ENHANCED BELT CONTROL FUNCTIONS =======
-async function transferForwardEnhanced() {
-  console.log('🔄 Enhanced belt forward: Continuous + pulse for grip');
-  
-  // Strategy 1: First try continuous movement
-  console.log('➡️ Continuous forward (5s)...');
-  await executeCommand({ action: 'transferForward' });
-  await delay(5000);
-  
-  // Check if movement detected
-  if (lastBeltStatus?.position === '02' || lastBeltStatus?.position === '03') {
-    console.log('✅ Continuous movement successful');
-    return true;
-  }
-  
-  // Strategy 2: If continuous fails, use pulsed approach
-  console.log('🔄 Falling back to pulsed approach...');
-  await executeCommand({ action: 'transferStop' });
-  await delay(500);
-  
-  // High-torque pulses (shorter off-time)
-  for (let i = 0; i < 8; i++) {
-    await executeCommand({ action: 'transferForward' });
-    await delay(800);  // Longer ON time
-    await executeCommand({ action: 'transferStop' });
-    await delay(200);  // Shorter OFF time
-    
-    // Check progress
-    if (lastBeltStatus?.position === '02' || lastBeltStatus?.position === '03') {
-      console.log(`✅ Pulsed movement successful at pulse ${i + 1}`);
-      return true;
-    }
-  }
-  
-  console.log('⚠️ Belt movement may be incomplete');
-  return false;
-}
-
 async function transferForwardToLimit() {
-  console.log('🎯 Transfer forward to LIMIT SWITCH (type 02)');
+  console.log('🎯 Transfer forward to LIMIT SWITCH');
   
   // Use the specific forward-to-limit command
   await executeCommand({ 
@@ -92,25 +53,45 @@ async function transferForwardToLimit() {
   
   // Wait for movement completion with timeout
   const startTime = Date.now();
+  let positionReached = false;
+  
   while (Date.now() - startTime < 15000) { // 15s timeout
     await delay(1000);
     
     if (lastBeltStatus?.position === '02') {
       console.log('✅ Reached middle position (limit switch)');
-      return true;
+      positionReached = true;
+      break;
     }
     
     if (lastBeltStatus?.position === '03') {
       console.log('✅ Reached end position');
-      return true;
+      positionReached = true;
+      break;
     }
     
     console.log(`⏳ Current belt position: ${lastBeltStatus?.position || 'unknown'}`);
   }
   
-  console.log('❌ Timeout waiting for limit switch');
+  if (!positionReached) {
+    console.log('❌ Timeout waiting for limit switch');
+  }
+  
   await executeCommand({ action: 'transferStop' });
-  return false;
+  return positionReached;
+}
+
+async function transferForwardExtended() {
+  console.log('🎯 Extended belt forward movement');
+  
+  // Use continuous movement for longer duration
+  console.log('➡️ Continuous forward (10s)...');
+  await executeCommand({ action: 'transferForward' });
+  await delay(10000);
+  
+  await executeCommand({ action: 'transferStop' });
+  console.log('✅ Extended movement complete');
+  return true;
 }
 
 // ======= WEBSOCKET =======
@@ -223,7 +204,7 @@ function connectWebSocket() {
           
           const abnormals = motors.filter(m => m.state === 1);
           
-          if (abnormals.length > 0 && !recoveryInProgress && !testMode) {
+          if (abnormals.length > 0 && !recoveryInProgress) {
             const recoverableMotors = abnormals.filter(m => !IGNORE_MOTOR_RECOVERY.includes(m.motorType));
             
             if (recoverableMotors.length > 0) {
@@ -337,66 +318,66 @@ async function autoRecoverMotors(abnormals) {
   console.log('🔧 Recovery sequence finished (30s cooldown active)');
 }
 
-// ======= ENHANCED FULL CYCLE =======
+// ======= UPDATED FULL CYCLE - FIXED BOTTLE THROWING =======
 async function executeFullCycle() {
-  console.log('🚀 AUTO: Enhanced full cycle starting');
+  console.log('🚀 AUTO: Full cycle starting');
   
   try {
     let stepperPos = '00';
-    let collectMotor = '02';
+    let collectMotor = '03'; // Default to pusher motor (03) for all materials
     
     switch (latestAIResult.materialType) {
       case 'PLASTIC_BOTTLE': 
-        stepperPos = '03'; 
-        collectMotor = '03'; 
+        stepperPos = '03'; // Plastic bottle position
         break;
       case 'METAL_CAN': 
-        stepperPos = '02'; 
-        collectMotor = '02'; 
+        stepperPos = '02'; // Metal can position  
         break;
       case 'GLASS': 
-        stepperPos = '01'; 
-        collectMotor = '02'; 
+        stepperPos = '01'; // Glass position
         break;
     }
     
     console.log(`📍 Routing to bin ${stepperPos} for ${latestAIResult.materialType}`);
     
     const sequence = [
+      // Step 1: Move stepper to correct position
       { action: 'stepperMotor', params: { position: stepperPos } },
-      { delay: 2000 },
+      { delay: 3000 }, // Wait for stepper to complete
       
-      // ENHANCED: Use direct forward-to-limit command
-      { action: 'transferForwardToLimit' },
-      { delay: 2000 },
+      // Step 2: Transport bottle INSIDE using extended movement
+      { action: 'transferForwardExtended' },
+      { delay: 2000 }, // Wait for belt to stop
       
-      // Pusher operation
-      { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },
-      { delay: 3000 },
-      { action: 'customMotor', params: { motorId: collectMotor, type: '00' } },
-      { delay: 500 },
+      // Step 3: Push bottle INTO bin (NOT outside)
+      { action: 'customMotor', params: { motorId: collectMotor, type: '03' } }, // Type 03 = INTO bin
+      { delay: 3000 }, // Wait for pusher to complete
+      { action: 'customMotor', params: { motorId: collectMotor, type: '00' } }, // Stop pusher
+      { delay: 1000 },
       
-      // Return sequence
+      // Step 4: Return belt to start position
       { action: 'transferReverse' },
-      { delay: 2000 },
+      { delay: 4000 }, // Extended return time
       { action: 'transferStop' },
-      { delay: 500 },
+      { delay: 1000 },
       
-      // Compaction
+      // Step 5: Run compactor
       { action: 'compactorStart' },
       { delay: 5000 },
       { action: 'compactorStop' },
       { delay: 1000 },
       
-      // Reset
+      // Step 6: Reset stepper to home
       { action: 'stepperMotor', params: { position: '00' } },
-      { delay: 1000 },
+      { delay: 2000 },
+      
+      // Step 7: Close gate
       { action: 'closeGate' }
     ];
     
     await executeSequence(sequence);
     
-    console.log('🏁 Cycle completed!');
+    console.log('🏁 Cycle completed! Bottle successfully processed and stored.');
     
     mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
       material: latestAIResult.materialType,
@@ -414,122 +395,11 @@ async function executeFullCycle() {
   } catch (err) {
     console.error('❌ Cycle failed:', err.message);
     cycleInProgress = false;
+    // Emergency stop all motors
     await executeCommand({ action: 'compactorStop' });
     await executeCommand({ action: 'transferStop' });
     await executeCommand({ action: 'closeGate' });
   }
-}
-
-// ======= ENHANCED MOTOR DIRECTION TEST =======
-async function runMotorTests() {
-  testMode = true;
-  console.log('🧪 Starting enhanced motor tests with better belt control...');
-  console.log('👁️ TIP: UPRIGHT bottle, centered. Check belt tension if slips.\n');
-  
-  // Global gate open
-  console.log('🚪 Opening gate...');
-  await executeCommand({ action: 'openGate' });
-  await delay(2000);
-  
-  // TEST 1: Belt Reverse (continuous, as before)
-  console.log('========================================');
-  console.log('TEST 1: Belt (02) Type 01 - Reverse (Expect eject)');
-  console.log('========================================');
-  console.log('🍼 Place UPRIGHT bottle at gate/belt start... 5s countdown.\n');
-  await delay(5000);
-  
-  await executeCustomMotorWithRepeat('02', '01', 8000);
-  await executeCommand({ action: 'transferStop' });
-  console.log('❓ Bottle ejected OUT? (Yes = good)\n');
-  await delay(3000);
-  
-  // TEST 2: Belt Forward to LIMIT
-  console.log('========================================');
-  console.log('TEST 2: Belt (02) Type 02 - Forward to LIMIT (Expect full transport)');
-  console.log('========================================');
-  console.log('🍼 Reposition UPRIGHT bottle at gate... 5s.\n');
-  await delay(5000);
-  
-  const success = await transferForwardToLimit();
-  if (success) {
-    console.log('✅ Bottle transported fully to pusher position');
-  } else {
-    console.log('❌ Bottle transport incomplete - check belt tension/motor');
-  }
-  console.log('❓ Bottle reached pusher position? (Should be ~1m inside)\n');
-  await delay(3000);
-  
-  // Close gate for pusher safety
-  await executeCommand({ action: 'closeGate' });
-  await delay(2000);
-  
-  // TEST 3-5: Pusher tests with enhanced pre-advance
-  for (let typeNum = 1; typeNum <= 3; typeNum++) {
-    console.log('========================================');
-    console.log(`TEST ${typeNum + 2}: Pusher (03) Type ${typeNum}`);
-    console.log('========================================');
-    console.log('🍼 Place UPRIGHT bottle mid-belt... 5s.\n');
-    await delay(5000);
-    
-    // Enhanced pre-advance
-    console.log('🔄 Enhanced belt pre-advancing...');
-    const advanceSuccess = await transferForwardEnhanced();
-    
-    if (advanceSuccess) {
-      console.log('✅ Bottle properly positioned for pusher');
-    } else {
-      console.log('⚠️ Bottle may not be in ideal position');
-    }
-    
-    await delay(2000);
-    
-    await executeCustomMotorWithRepeat('03', typeNum.toString(), 5000);
-    await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
-    console.log(`❓ Pusher Type ${typeNum} pushed INTO bin or OUT? (Type 03 = INTO expected)\n`);
-    await delay(3000);
-    
-    // Reset belt
-    await executeCommand({ action: 'transferReverse' });
-    await delay(3000);
-    await executeCommand({ action: 'transferStop' });
-  }
-  
-  // Final reset & calibrate
-  await executeCommand({ action: 'closeGate' });
-  await executeCommand({ action: 'calibrateWeight' });
-  await delay(2000);
-  
-  testMode = false;
-  
-  // Summary
-  console.log('\n========================================');
-  console.log('✅ ENHANCED TESTS DONE!');
-  console.log('📋 Belt Performance Summary:');
-  console.log('   - Forward to Limit: ' + (success ? '✅ WORKING' : '❌ NEEDS CHECK'));
-  console.log('   - Enhanced Control: ' + (await transferForwardEnhanced() ? '✅ WORKING' : '❌ NEEDS ADJUSTMENT'));
-  console.log('🔧 If issues: Check belt tension, motor power, limit switches');
-  console.log('========================================\n');
-  
-  mqttClient.publish(`rvm/${DEVICE_ID}/test_complete`, JSON.stringify({
-    message: 'Enhanced belt control tests complete',
-    beltPerformance: success ? 'good' : 'needs_check',
-    timestamp: new Date().toISOString()
-  }));
-}
-
-async function executeCustomMotorWithRepeat(motorId, type, baseDelay) {
-  await executeCommand({ action: 'customMotor', params: { motorId, type } });
-  await delay(baseDelay);
-  
-  setTimeout(async () => {
-    if (motorStatusCache[motorId] && motorStatusCache[motorId].state === 0) {
-      console.log('✅ Full movement detected');
-    } else {
-      console.log('⚠️ Possible stuck - repeating 3s...');
-      await executeCommand({ action: 'customMotor', params: { motorId, type } });
-      await delay(3000);
-    }
-  }, baseDelay / 2);
 }
 
 // ======= UTILITIES =======
@@ -610,11 +480,9 @@ async function executeCommand(commandData) {
       deviceType
     };
   } else if (action === 'transferForwardToLimit') {
-    // Special case for enhanced belt control
     return await transferForwardToLimit();
-  } else if (action === 'transferForwardEnhanced') {
-    // Special case for enhanced belt control
-    return await transferForwardEnhanced();
+  } else if (action === 'transferForwardExtended') {
+    return await transferForwardExtended();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -661,12 +529,7 @@ async function executeSequence(sequence) {
     if (step.delay) {
       await delay(step.delay);
     } else if (step.action) {
-      if (step.action === 'transferForwardToLimit' || step.action === 'transferForwardEnhanced') {
-        // These are handled within their functions
-        await executeCommand(step);
-      } else {
-        await executeCommand(step);
-      }
+      await executeCommand(step);
     }
   }
 }
@@ -726,16 +589,6 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
-    if (topic.includes('/commands') && payload.action === 'test/motors') {
-      console.log('\n========================================');
-      console.log('🧪 ENHANCED MOTOR DIRECTION TEST MODE');
-      console.log('========================================\n');
-      testMode = true;
-      await runMotorTests();
-      testMode = false;
-      return;
-    }
-    
     if (topic.includes('/commands')) {
       console.log(`📩 Command: ${payload.action}`);
       
@@ -761,15 +614,16 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v2.9 ENHANCED BELT CONTROL');
+console.log('🚀 RVM AGENT v3.0 PRODUCTION');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🧪 ENHANCED FEATURES:');
-console.log('   - Direct forward-to-limit commands');
-console.log('   - Continuous + pulsed belt control');
-console.log('   - Position monitoring with timeouts');
-console.log('   - Enhanced test mode with performance summary');
+console.log('🔧 PRODUCTION FEATURES:');
+console.log('   - Enhanced belt control (10s extended movement)');
+console.log('   - Fixed bottle throwing outside issue');
+console.log('   - Pusher motor always uses type 03 (INTO bin)');
+console.log('   - Motor tests removed for production use');
 console.log('========================================');
-console.log('🧪 TEST MODE:');
-console.log('   Run: curl -X POST http://localhost:3008/api/rvm/RVM-3101/test/motors');
+console.log('🤖 AUTO MODE:');
+console.log('   Enable: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
+console.log('   Status: curl http://localhost:3008/api/rvm/RVM-3101/auto/status');
 console.log('========================================\n');
