@@ -1,9 +1,12 @@
-// RVM Agent v3.4 FINAL FIX - Controlled Movement + Correct Compactor
+// RVM Agent v3.4 FINAL FIX - Controlled Movement from Known Start Position
+// ROOT CAUSE FOUND: Belt was starting from position '00' (unknown), jumping to '03' (end)
+// SOLUTION: Always ensure belt at position '01' (start) FIRST, then use short timed bursts
 // Changes from v3.3:
-// - Timed forward with position monitoring (stops at '02')
+// - NEW: ensureBeltAtStart() - moves belt to '01' before forward movement
+// - Short 1-second forward bursts with position checks (not continuous)
 // - Pusher retracts BEFORE belt reverses
-// - CONTROLLED belt reverse (not continuous full-speed)
-// - Compactor uses type '03' (not '01')
+// - CONTROLLED belt reverse (monitored, not full-speed)
+// - Compactor uses type '03'
 // Save as: agent-v3.4-FINAL.js
 // Run: node agent-v3.4-FINAL.js
 
@@ -40,81 +43,110 @@ let ws = null;
 let lastBeltStatus = null;  // Track belt motor (02) status
 let lastPusherStatus = null;  // Track pusher motor (03) status
 
-// ======= FIXED BELT CONTROL - TIMED BURSTS WITH POSITION MONITORING =======
+// ======= FIXED BELT CONTROL - ENSURE START POSITION FIRST =======
+async function ensureBeltAtStart() {
+  console.log('🔍 Checking belt position...');
+  
+  const currentPos = lastBeltStatus?.position || '00';
+  console.log(`   Current position: ${currentPos}`);
+  
+  if (currentPos === '01') {
+    console.log('✅ Already at start position');
+    return true;
+  }
+  
+  if (currentPos === '00' || currentPos === '02' || currentPos === '03') {
+    console.log('🔄 Moving belt to start position first...');
+    
+    // Reverse to start
+    await executeCommand({ 
+      action: 'customMotor', 
+      params: { motorId: '02', type: '01' }  // Reverse
+    });
+    
+    const startTime = Date.now();
+    while (Date.now() - startTime < 12000) {
+      await delay(300);
+      if (lastBeltStatus?.position === '01') {
+        console.log('✅ Reached start position');
+        await executeCommand({ action: 'transferStop' });
+        await delay(500);
+        return true;
+      }
+      console.log(`   Moving to start: ${lastBeltStatus?.position || 'unknown'}`);
+    }
+    
+    // Force stop
+    await executeCommand({ action: 'transferStop' });
+    console.log('⚠️ Could not confirm start position, proceeding anyway');
+  }
+  
+  return true;
+}
+
 async function transferForwardToMiddle() {
   console.log('🎯 Transfer forward to MIDDLE position (controlled movement)');
   
-  // Start with a short forward burst
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: '02', 
-      type: '02'  // Forward direction
-    } 
-  });
+  // CRITICAL: Ensure belt starts from position '01' first
+  await ensureBeltAtStart();
+  await delay(500);
   
-  const startTime = Date.now();
-  let positionReached = false;
-  let lastPosition = lastBeltStatus?.position || '01';
+  // Now do SHORT timed forward movements
+  console.log('🔄 Starting controlled forward to middle...');
   
-  // Monitor position while moving (max 12 seconds)
-  while (Date.now() - startTime < 12000) {
-    await delay(300);  // Fast polling
+  let attempts = 0;
+  const maxAttempts = 3;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    console.log(`   Attempt ${attempts}/${maxAttempts}`);
     
-    const currentPosition = lastBeltStatus?.position || lastPosition;
+    // Short forward burst (1 second)
+    await executeCommand({ 
+      action: 'customMotor', 
+      params: { motorId: '02', type: '02' }
+    });
     
-    console.log(`⏳ Belt position: ${currentPosition}`);
+    await delay(1000);  // Run for 1 second only
+    await executeCommand({ action: 'transferStop' });
+    await delay(500);  // Let it settle
     
-    // STOP immediately when middle position detected
-    if (currentPosition === '02') {
-      console.log('✅ MIDDLE POSITION DETECTED - STOPPING NOW');
-      await executeCommand({ action: 'transferStop' });
-      await delay(500);  // Brief settle time
-      
-      // Verify we're still at '02'
-      if (lastBeltStatus?.position === '02') {
-        console.log('✅ Confirmed at middle position');
-        positionReached = true;
-        break;
-      }
+    const currentPos = lastBeltStatus?.position || '00';
+    console.log(`   Position after burst: ${currentPos}`);
+    
+    if (currentPos === '02') {
+      console.log('✅ Reached middle position!');
+      return true;
     }
     
-    // Error: Overshot to end position
-    if (currentPosition === '03') {
-      console.log('❌ OVERSHOT to end position - executing recovery');
+    if (currentPos === '03') {
+      console.log('⚠️ Overshot to end - reversing...');
+      await executeCommand({ 
+        action: 'customMotor', 
+        params: { motorId: '02', type: '01' }
+      });
+      await delay(1500);
       await executeCommand({ action: 'transferStop' });
       await delay(500);
       
-      // Reverse briefly to get back to middle
-      await executeCommand({ action: 'transferReverse' });
-      await delay(1500);  // Timed reverse (adjust based on your belt speed)
-      await executeCommand({ action: 'transferStop' });
-      await delay(500);
-      
-      // Verify position after recovery
       if (lastBeltStatus?.position === '02') {
-        console.log('✅ Recovered to middle position');
-        positionReached = true;
-        break;
-      } else {
-        console.log('❌ Recovery failed - aborting cycle');
-        throw new Error('Belt positioning failed after recovery attempt');
+        console.log('✅ Recovered to middle');
+        return true;
       }
+      // If still not at middle, go back to start and retry
+      await ensureBeltAtStart();
+      continue;
     }
     
-    lastPosition = currentPosition;
+    // If still at '01', continue with another burst
+    if (currentPos === '01') {
+      console.log('   Still at start, continuing...');
+      continue;
+    }
   }
   
-  // Safety stop
-  await executeCommand({ action: 'transferStop' });
-  
-  if (!positionReached) {
-    console.log('❌ Timeout - could not reach middle position');
-    throw new Error('Belt forward timeout');
-  }
-  
-  console.log('✅ Belt ready at middle position for push');
-  return true;
+  console.log('❌ Could not reach middle position after 3 attempts');
+  throw new Error('Belt positioning failed - could not reach middle');
 }
 
 async function transferReverseToStartControlled() {
@@ -403,6 +435,10 @@ async function executeFullCycle() {
     console.log(`📍 Routing to bin ${stepperPos} for ${latestAIResult.materialType}`);
     
     const sequence = [
+      // Step 0: Ensure belt at start position FIRST
+      { action: 'ensureBeltAtStart' },
+      { delay: 1000 },
+      
       // Step 1: Position stepper
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 3000 },
@@ -566,6 +602,8 @@ async function executeCommand(commandData) {
   } else if (action === 'getMotorStatus') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getModuleStatus`;
     apiPayload = { moduleId: currentModuleId, type: '03' };
+  } else if (action === 'ensureBeltAtStart') {
+    return await ensureBeltAtStart();
   } else if (action === 'transferForwardToMiddle') {
     return await transferForwardToMiddle();
   } else if (action === 'transferReverseToStartControlled') {
@@ -701,14 +739,15 @@ console.log('🚀 RVM AGENT v3.4 FINAL FIX');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
 console.log('🔧 CRITICAL FIXES:');
-console.log('   1. Belt stops at middle (02) - no overshoot');
-console.log('   2. Pusher RETRACTS before belt reverses');
-console.log('   3. CONTROLLED belt reverse (not full-speed)');
-console.log('   4. Compactor uses type "03" (test with "01" if fails)');
+console.log('   1. Belt MUST start from position 01 (not 00!)');
+console.log('   2. Short 1-second forward bursts to reach middle');
+console.log('   3. Pusher RETRACTS before belt reverses');
+console.log('   4. CONTROLLED belt reverse (monitored)');
+console.log('   5. Compactor uses type "03"');
 console.log('========================================');
 console.log('📋 SEQUENCE:');
-console.log('   Forward → Stop at 02 → Push → Wait → Retract Pusher');
-console.log('   → Gentle Reverse → Compact → Reset → Close');
+console.log('   Ensure Start → Forward Bursts → Stop at 02 → Push');
+console.log('   → Wait → Retract Pusher → Gentle Reverse → Compact');
 console.log('========================================');
 console.log('🤖 USAGE:');
 console.log('   Enable Auto: curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
