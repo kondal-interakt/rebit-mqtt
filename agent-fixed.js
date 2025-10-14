@@ -293,20 +293,20 @@ async function executeFullCycle() {
       { action: 'stepperMotor', params: { position: stepperPos } },
       { delay: 2000 },
       
-      // Step 2: Transfer belt moves forward (Motor 02) - should move to limit switch
-      { action: 'transferForward' },
-      { delay: 8000 },  // Increased from 3s to 8s - wait for belt to fully move
+      // Step 2: Belt moves INWARD (reverse = into machine, forward = out of machine!)
+      { action: 'transferReverse' },  // SWAPPED! Reverse pulls bottle IN
+      { delay: 8000 },  // Wait for belt to move bottle to pusher
       
       // Step 3: Push item into bin (Motor 03) while belt still moving
       { action: 'customMotor', params: { motorId: collectMotor, type: '03' } },
-      { delay: 3000 },  // Increased delay for pusher
+      { delay: 3000 },  // Pusher time
       
       // Step 4: Stop pusher
       { action: 'customMotor', params: { motorId: collectMotor, type: '00' } },
       { delay: 500 },
       
-      // Step 5: Belt reverse back to clear pusher area
-      { action: 'transferReverse' },
+      // Step 5: Belt moves back OUT to clear pusher area
+      { action: 'transferForward' },  // SWAPPED! Forward pushes OUT
       { delay: 2000 },
       
       // Step 6: Stop transfer belt
