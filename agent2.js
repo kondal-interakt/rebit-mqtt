@@ -30,8 +30,9 @@ const SYSTEM_CONFIG = {
   },
   
   // STEPPER MOTOR POSITION CODES (from documentation section 13)
-  // NOTE: 2000/20000 in config are step counts, not position codes!
+  // CRITICAL: Stepper motor has its own module ID: 0F (section 10)
   stepper: {
+    moduleId: '0F',  // Stepper motor module (NOT the main module!)
     positions: {
       initialization: '00',   // Full reset
       home: '01',            // Return to origin (flat basket)
@@ -441,14 +442,15 @@ async function executeCommand(commandData) {
   } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
     
-    // CRITICAL: Use position code directly (00, 01, 02, 03)
+    // CRITICAL FIX: Stepper motor has its own module ID: 0F (not currentModuleId!)
+    const stepperModuleId = SYSTEM_CONFIG.stepper.moduleId; // '0F'
     const positionCode = params?.position || '01';
     
-    console.log(`   🔧 API Call: stepMotorSelect with position="${positionCode}"`);
+    console.log(`   🔧 API Call: stepMotorSelect with moduleId="${stepperModuleId}", position="${positionCode}"`);
     
     apiPayload = { 
-      moduleId: currentModuleId, 
-      type: positionCode,  // Send position code as 'type' parameter
+      moduleId: stepperModuleId,  // FIXED: Use 0F for stepper motor
+      type: positionCode,
       deviceType 
     };
   } else if (action === 'customMotor') {
@@ -557,13 +559,14 @@ console.log('🚀 RVM AGENT v7.2 - FIXED STEPPER!');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
 console.log('🔧 CRITICAL FIX:');
-console.log('   ❌ OLD: Sent "2000" and "20000" (WRONG!)');
-console.log('   ✅ NEW: Sending "02", "03", "01" (CORRECT!)');
+console.log('   ❌ OLD: moduleId="09" (WRONG!)');
+console.log('   ✅ NEW: moduleId="0F" (Stepper Module!)');
+console.log('   • Stepper has its own module: 0F');
 console.log('   • Position 03 = Plastic dump');
 console.log('   • Position 02 = Metal dump');
 console.log('   • Position 01 = Home');
 console.log('========================================');
 console.log('⚙️ UPDATED SETTINGS:');
 console.log('   • Belt forward: 8000ms (increased)');
-console.log('   • Stepper will now ROTATE!');
+console.log('   • Stepper Module ID: 0F');
 console.log('========================================\n');
