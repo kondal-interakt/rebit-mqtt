@@ -1,18 +1,26 @@
-// RVM Agent v6.1 - SIMPLIFIED BELT SYSTEM
-// Remove drum lifting, use belt directly to move bottle to bin
-// Save as: agent-v6.1-simple-belt.js
+// RVM Agent v6.3 - CORRECT FLOW
+// Gate Open → Belt Forward → Drum Lift & Center → Weight Detection → Drum Down → Belt Forward to Bin → Belt Reverse → Gate Close
+// Save as: agent-v6.3-correct-flow.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-// ======= SIMPLIFIED SYSTEM CONFIGURATION =======
+// ======= SYSTEM CONFIGURATION =======
 const SYSTEM_CONFIG = {
-  // Belt commands only (from technical document)
+  // Drum commands
+  drum: {
+    rise: { moduleId: "09", motorId: "07", type: "01", deviceType: "5" },
+    descend: { moduleId: "09", motorId: "07", type: "03", deviceType: "5" },
+    center: { moduleId: "09", motorId: "03", type: "01", deviceType: "5" },
+    stop: { moduleId: "09", motorId: "03", type: "00", deviceType: "5" }
+  },
+  
+  // Belt commands
   belt: {
     forward: { motorId: "02", type: "02" }, // Forward to limit
-    reverse: { motorId: "02", type: "01" }, // Reverse
+    reverse: { motorId: "02", type: "01" }, // Reverse to start
     stop: { motorId: "02", type: "00" },    // Stop
     toCollectBin: { motorId: "03", type: "03" } // Pusher to bin
   },
@@ -20,7 +28,7 @@ const SYSTEM_CONFIG = {
   // Applet configurations
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
-    timeouts: { motor: 10000, transfer: 10000, pressPlate: 10000 }
+    timeouts: { motor: 10000, transfer: 8000, pressPlate: 10000 }
   }
 };
 
@@ -50,11 +58,50 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= SIMPLIFIED BELT CONTROL =======
-async function beltForwardToBin() {
-  console.log('🎯 Belt moving bottle to bin...');
+// ======= DRUM CONTROL =======
+async function drumRiseAndCenter() {
+  console.log('🔼 Drum rising and centering for weight detection...');
   
-  // Start belt forward movement - CONTINUOUS for full transport
+  // Drum rise
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.drum.rise
+  });
+  await delay(3000);
+  
+  // Drum center/roll to position bottle for weighing
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.drum.center
+  });
+  await delay(2000);
+  
+  // Stop drum
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.drum.stop
+  });
+  
+  console.log('✅ Drum raised and centered for weight detection');
+}
+
+async function drumDescend() {
+  console.log('🔽 Drum descending...');
+  
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.drum.descend
+  });
+  await delay(3000);
+  
+  console.log('✅ Drum descended');
+}
+
+// ======= BELT CONTROL =======
+async function beltForwardToWeightPosition() {
+  console.log('🎯 Belt moving bottle to weight position...');
+  
+  // Short forward movement to position bottle for drum
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -63,18 +110,36 @@ async function beltForwardToBin() {
     }
   });
   
-  // Use applet timing: 10000ms for full transport
-  console.log(`➡️ Continuous forward (${SYSTEM_CONFIG.applet.timeouts.transfer}ms)...`);
-  await delay(SYSTEM_CONFIG.applet.timeouts.transfer);
+  await delay(4000); // Shorter movement for weight position
   
-  // Stop belt
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.belt.stop
   });
   
-  console.log('✅ Bottle transported to bin position');
-  return true;
+  console.log('✅ Bottle at weight position');
+}
+
+async function beltForwardToBin() {
+  console.log('🎯 Belt moving bottle to bin...');
+  
+  // Full forward movement to bin after weight detection
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { 
+      motorId: SYSTEM_CONFIG.belt.forward.motorId,
+      type: SYSTEM_CONFIG.belt.forward.type
+    }
+  });
+  
+  await delay(SYSTEM_CONFIG.applet.timeouts.transfer);
+  
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.stop
+  });
+  
+  console.log('✅ Bottle at bin position');
 }
 
 async function beltReverseToStart() {
@@ -88,7 +153,6 @@ async function beltReverseToStart() {
     }
   });
   
-  // Return for 8 seconds (shorter than forward)
   await delay(8000);
   
   await executeCommand({ 
@@ -97,14 +161,12 @@ async function beltReverseToStart() {
   });
   
   console.log('✅ Belt back at start position');
-  return true;
 }
 
 // ======= PUSHER & COMPACTOR =======
 async function pushBottleIntoBin() {
   console.log('💪 Pusher moving bottle into bin...');
   
-  // Use pusher motor to push bottle from belt into actual bin
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -113,10 +175,8 @@ async function pushBottleIntoBin() {
     }
   });
   
-  // Wait for pusher to complete
   await delay(4000);
   
-  // Stop pusher
   await executeCommand({ 
     action: 'customMotor', 
     params: { motorId: '03', type: '00' }
@@ -143,63 +203,95 @@ async function compactorOperation() {
   console.log('✅ Compaction complete');
 }
 
-// ======= FULL CYCLE - SIMPLIFIED BELT SYSTEM =======
+// ======= SORTER CONTROL =======
+async function positionSorterForMaterial(materialType) {
+  console.log(`🔄 Sorter routing ${materialType} to correct bin...`);
+  
+  let sorterPosition = '00';
+  
+  switch (materialType) {
+    case 'PLASTIC_BOTTLE': sorterPosition = '03'; break;
+    case 'METAL_CAN': sorterPosition = '02'; break;
+    case 'GLASS': sorterPosition = '01'; break;
+  }
+  
+  await executeCommand({ 
+    action: 'stepperMotor', 
+    params: { position: sorterPosition }
+  });
+  
+  await delay(3000);
+  console.log(`✅ Sorter positioned to bin ${sorterPosition}`);
+}
+
+async function resetSorterToHome() {
+  console.log('🏠 Resetting sorter to home...');
+  
+  await executeCommand({ 
+    action: 'stepperMotor', 
+    params: { position: '00' }
+  });
+  
+  await delay(2000);
+  console.log('✅ Sorter at home position');
+}
+
+// ======= FULL CYCLE - CORRECT FLOW =======
 async function executeFullCycle() {
-  console.log('\n🚀 Starting cycle (Simple Belt System)...');
+  console.log('\n🚀 Starting cycle (Correct Flow)...');
   
   try {
-    let stepperPos = '00';
-    
-    switch (latestAIResult.materialType) {
-      case 'PLASTIC_BOTTLE': stepperPos = '03'; break;
-      case 'METAL_CAN': stepperPos = '02'; break;
-      case 'GLASS': stepperPos = '01'; break;
-    }
-    
-    console.log(`📍 ${latestAIResult.materialType} → Bin ${stepperPos}`);
+    console.log(`📍 AI Detected: ${latestAIResult.materialType}`);
     
     // Step 1: Position sorter to correct bin
-    console.log('🔄 Positioning sorter...');
-    await executeCommand({ 
-      action: 'stepperMotor', 
-      params: { position: stepperPos }
-    });
-    await delay(3000);
+    await positionSorterForMaterial(latestAIResult.materialType);
+    await delay(1000);
     
-    // Step 2: BELT MOVES BOTTLE DIRECTLY TO BIN (no drum)
+    // Step 2: Belt Forward (initial movement)
+    await beltForwardToWeightPosition();
+    await delay(1000);
+    
+    // Step 3: Drum Lift & Center
+    await drumRiseAndCenter();
+    await delay(1000);
+    
+    // Step 4: Weight Detection (already done before cycle started)
+    console.log(`⚖️ Weight detected: ${latestWeight.weight}g`);
+    await delay(1000);
+    
+    // Step 5: Drum Down
+    await drumDescend();
+    await delay(1000);
+    
+    // Step 6: Belt Forward to Bin (final movement)
     await beltForwardToBin();
     await delay(1000);
     
-    // Step 3: Push bottle into actual bin
+    // Step 7: Push bottle into bin
     await pushBottleIntoBin();
     await delay(1000);
     
-    // Step 4: Return belt to start position
+    // Step 8: Belt Reverse
     await beltReverseToStart();
     await delay(1000);
     
-    // Step 5: Run compactor
+    // Step 9: Run compactor
     await compactorOperation();
     await delay(1000);
     
-    // Step 6: Reset sorter to home
-    console.log('🏠 Resetting sorter...');
-    await executeCommand({ 
-      action: 'stepperMotor', 
-      params: { position: '00' }
-    });
-    await delay(2000);
+    // Step 10: Reset sorter to home
+    await resetSorterToHome();
+    await delay(1000);
     
-    // Step 7: Close gate
+    // Step 11: Gate Close
     await executeCommand({ action: 'closeGate' });
     await delay(1000);
     
-    console.log('✅ Cycle complete!\n');
+    console.log('✅ Cycle complete! Bottle processed successfully.\n');
     
     mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
       material: latestAIResult.materialType,
       weight: latestWeight.weight,
-      binPosition: stepperPos,
       timestamp: new Date().toISOString()
     }));
     
@@ -211,10 +303,12 @@ async function executeFullCycle() {
     console.error('❌ Cycle failed:', err.message);
     cycleInProgress = false;
     
-    // Emergency stop all systems
+    // Emergency stop
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.belt.stop });
+    await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.drum.stop });
     await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
     await executeCommand({ action: 'customMotor', params: { motorId: '04', type: '00' } });
+    await drumDescend();
     await executeCommand({ action: 'closeGate' });
   }
 }
@@ -502,14 +596,18 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v6.1 - SIMPLE BELT SYSTEM');
+console.log('🚀 RVM AGENT v6.3 - CORRECT FLOW');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🔄 SIMPLIFIED SYSTEM:');
-console.log('   1. Belt moves bottle directly to bin (10s)');
-console.log('   2. Pusher moves bottle into bin');
-console.log('   3. Belt returns to start (8s)');
-console.log('   4. Compactor runs');
+console.log('🔄 CORRECT SEQUENCE:');
+console.log('   1. Gate Open');
+console.log('   2. Belt Forward (to weight position)');
+console.log('   3. Drum Lift & Center');
+console.log('   4. Weight Detection');
+console.log('   5. Drum Down');
+console.log('   6. Belt Forward to Bin');
+console.log('   7. Belt Reverse');
+console.log('   8. Gate Close');
 console.log('========================================');
 console.log('🤖 AUTO MODE:');
 console.log('   Enable: POST /api/rvm/RVM-3101/auto/enable');
