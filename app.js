@@ -1,28 +1,42 @@
-// RVM Agent v4.1 - CORRECT FLOW (From Manufacturer)
-// BREAKTHROUGH: Manufacturer revealed the ACTUAL flow!
-//
-// CORRECT FLOW:
-// 1. Gate Open
-// 2. Belt Forward → weighing position
-// 3. Drum Lift & Center → lifts bottle UP to weigh it
-// 4. Weight Detection → weighs bottle while on drum
-// 5. Drum Down → puts bottle BACK on belt
-// 6. Belt Forward to Bin → pushes bottle into bin
-// 7. Belt Reverse → returns to start
-// 8. Gate Close
-//
-// KEY INSIGHT: Drum is a WEIGHING PLATFORM, not a pusher!
-// - Motor 07: Lifts drum UP to weigh, DOWN to release
-// - Motor 03: Centers the bottle on drum (rotation)
-// - Belt does the final push into bin!
-//
-// Save as: agent-v4.1-correct-flow.js
-// Run: node agent-v4.1-correct-flow.js
+// RVM Agent v6.8 - STEPPER MOTOR FIX - SIMPLIFIED
+// Stepper motor (white basket) rotates AFTER bottle arrives to dump it into crusher
+// Save as: agent-v6.8-stepper-dump-simple.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
+
+// ======= SYSTEM CONFIGURATION =======
+const SYSTEM_CONFIG = {
+  // Belt commands (from 5.3, 5.4, 5.5)
+  belt: {
+    forwardToLimit: { motorId: "02", type: "02" },    // 5.3 - to limit switch
+    reverseBack: { motorId: "02", type: "01" },       // 5.4 - reverse back  
+    stop: { motorId: "02", type: "00" },              // 5.5 - stop
+    forwardToSorter: { motorId: "03", type: "03" }    // 5.6 - to sorter (white basket)
+  },
+  
+  // Compactor commands (from 5.7, 5.8)
+  compactor: {
+    start: { motorId: "04", type: "01" },             // 5.7 - start
+    stop: { motorId: "04", type: "00" }               // 5.8 - stop
+  },
+  
+  // Timing configurations
+  applet: {
+    weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
+    timeouts: { 
+      motor: 10000,
+      beltToWeightPosition: 3000,
+      beltToSorter: 5000,        // Time to move bottle to white basket
+      beltReverse: 8000,         // Time for belt to return
+      compactor: 6000,           // Compactor operation time
+      sorterRotate: 4000,        // Time for basket to rotate and dump into crusher
+      sorterHome: 2000           // Time to reset basket position
+    }
+  }
+};
 
 // ======= CONFIG =======
 const DEVICE_ID = 'RVM-3101';
@@ -33,28 +47,15 @@ const MQTT_USERNAME = 'mqttuser';
 const MQTT_PASSWORD = 'mqttUser@2025';
 const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
 
-const MOTOR_CONFIG = {
-  GATE: '01',
-  TRANSFER_BELT: '02',
-  DRUM_CENTER: '03',       // Centers bottle on drum
-  COMPACTOR: '04',
-  DRUM_LIFT: '07',         // Lifts/lowers weighing platform
-  STEPPER: 'stepper'
-};
-
-const DEVICE_TYPE = 5;
-
 // State
 let currentModuleId = null;
 let latestAIResult = null;
 let latestWeight = null;
 let pendingCommands = new Map();
 let motorStatusCache = {};
-let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
 let calibrationAttempts = 0;
-const IGNORE_MOTOR_RECOVERY = ['05'];
 let ws = null;
 let lastBeltStatus = null;
 
@@ -62,285 +63,222 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= SORTER OPERATIONS (PUSHER MECHANISM) =======
-async function positionSorterToBin(binPosition) {
-  console.log(`🔄 [SORTER] Positioning to bin ${binPosition}...`);
+// ======= BELT CONTROL =======
+async function beltForwardToWeightPosition() {
+  console.log('🎯 Step 2: Belt moving bottle to weight position...');
+  
   await executeCommand({ 
-    action: 'stepperMotor', 
-    params: { position: binPosition }
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.forwardToLimit
   });
-  await delay(3000);
-  console.log('✅ [SORTER] Positioned at bin');
+  
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltToWeightPosition);
+  
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.stop
+  });
+  
+  console.log('✅ Bottle at weight position');
+  await delay(500);
 }
 
-async function sorterRotateToPushBottle() {
-  console.log('🔄 [SORTER] ROTATING to push bottle into bin...');
+async function beltForwardToSorter() {
+  console.log('🎯 Step 4: Belt moving bottle to STEPPER MOTOR (white basket)...');
   
-  // Rotate sorter motor to push bottle
   await executeCommand({ 
     action: 'customMotor', 
-    params: { 
-      motorId: '05',  // Sorter motor ID
-      type: '01',     // Rotate/push
-      deviceType: DEVICE_TYPE
-    }
+    params: SYSTEM_CONFIG.belt.forwardToSorter
   });
   
-  // Rotate for enough time to push bottle into bin
-  await delay(5000);  // 5 seconds rotation to push
+  console.log(`   Running for ${SYSTEM_CONFIG.applet.timeouts.beltToSorter}ms...`);
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltToSorter);
   
-  // Stop rotation
   await executeCommand({ 
     action: 'customMotor', 
-    params: { 
-      motorId: '05',
-      type: '00',  // Stop
-      deviceType: DEVICE_TYPE
-    }
+    params: SYSTEM_CONFIG.belt.stop
   });
   
-  console.log('✅ [SORTER] Bottle pushed into bin');
+  console.log('✅ Bottle on white basket (stepper motor sorter)');
+  await delay(1000); // Extra delay to ensure bottle is properly positioned
+}
+
+async function beltReverseToStart() {
+  console.log('🔄 Step 6: Belt returning to start...');
   
-  // Wait for bottle to drop
-  console.log('⏳ [SORTER] Waiting 3s for bottle to drop...');
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.reverseBack
+  });
+  
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltReverse);
+  
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.stop
+  });
+  
+  console.log('✅ Belt at start position');
+  await delay(500);
+}
+
+// ======= COMPACTOR =======
+// async function compactorOperation() {
+//   console.log('🔨 Step 7: Running compactor...');
+  
+//   await executeCommand({ 
+//     action: 'customMotor', 
+//     params: SYSTEM_CONFIG.compactor.start
+//   });
+  
+//   await delay(SYSTEM_CONFIG.applet.timeouts.compactor);
+  
+//   await executeCommand({ 
+//     action: 'customMotor', 
+//     params: SYSTEM_CONFIG.compactor.stop
+//   });
+  
+//   console.log('✅ Compaction complete');
+// }
+
+async function compactorOperation() {
+  console.log('🔨 Step 7: Running compactor...');
+  
+  // Forward compaction
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.compactor.start
+  });
+  
+  await delay(SYSTEM_CONFIG.applet.timeouts.compactor);
+  
+  // Reverse 3 seconds (per flowchart)
+  console.log('   ⏪ Reversing compactor 3s...');
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: { motorId: '04', type: '02' }  // Type 02 = reverse
+  });
+  
   await delay(3000);
+  
+  // Stop compactor
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.compactor.stop
+  });
+  
+  console.log('✅ Compaction complete');
+}
+
+// ======= STEPPER MOTOR (WHITE BASKET) CONTROL =======
+async function dumpBottleIntoCrusher(materialType) {
+  console.log('🔄 Step 5: STEPPER MOTOR - Rotating white basket to dump bottle INTO CRUSHER...');
+  
+  let sorterPosition = '03'; // Default plastic
+  
+  switch (materialType) {
+    case 'PLASTIC_BOTTLE': 
+      sorterPosition = '03'; 
+      console.log('   🔵 Rotating to PLASTIC crusher position (03)');
+      break;
+    case 'METAL_CAN': 
+      sorterPosition = '02'; 
+      console.log('   🟡 Rotating to METAL crusher position (02)');
+      break;
+    case 'GLASS': 
+      sorterPosition = '01'; 
+      console.log('   🟢 Rotating to GLASS crusher position (01)');
+      break;
+  }
+  
+  console.log('   ⚠️ White basket will now TILT/ROTATE to dump bottle INTO CRUSHER!');
+  
+  // Send stepper motor command to rotate basket (dump position)
+  await executeCommand({ 
+    action: 'stepperMotor', 
+    params: { position: sorterPosition }
+  });
+  
+  console.log('   ⏳ Rotating basket to dump position...');
+  await delay(SYSTEM_CONFIG.applet.timeouts.sorterRotate);
+  
+  console.log('✅ Basket rotated! Bottle should fall into crusher!');
+  await delay(1500); // Extra delay for bottle to completely fall into crusher
 }
 
 async function resetSorterToHome() {
-  console.log('🏠 [SORTER] Returning to home position...');
+  console.log('🏠 Step 8: Resetting stepper motor (basket) to home position...');
+  
+  // Position 01 = Return to origin (home position)
   await executeCommand({ 
     action: 'stepperMotor', 
-    params: { position: '00' }
+    params: { position: '01' }
   });
-  await delay(2000);
-  console.log('✅ [SORTER] At home position');
-}
-async function liftDrumForWeighing() {
-  console.log('⬆️ [DRUM] Lifting weighing platform UP...');
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.DRUM_LIFT, 
-      type: '01',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  await delay(2000);
-  console.log('✅ [DRUM] Weighing platform raised');
+  
+  await delay(SYSTEM_CONFIG.applet.timeouts.sorterHome);
+  console.log('✅ Basket at home position (ready for next bottle)');
 }
 
-async function lowerDrumAfterWeighing() {
-  console.log('⬇️ [DRUM] Lowering weighing platform DOWN...');
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.DRUM_LIFT, 
-      type: '03',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  await delay(2000);
-  console.log('✅ [DRUM] Bottle back on belt');
-}
-
-async function centerBottleOnDrum() {
-  console.log('🎯 [DRUM] Centering bottle on platform...');
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.DRUM_CENTER, 
-      type: '01',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  await delay(1000);
-  
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.DRUM_CENTER, 
-      type: '00',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  console.log('✅ [DRUM] Bottle centered');
-}
-
-// ======= BELT OPERATIONS =======
-async function moveBeltToWeighingPosition() {
-  console.log('🎯 [BELT] Moving to weighing position...');
-  
-  // Move forward continuously
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.TRANSFER_BELT, 
-      type: '02',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  
-  // Wait for position '02' (middle/weighing position)
-  const startTime = Date.now();
-  while (Date.now() - startTime < 8000) {
-    await delay(200);
-    const pos = lastBeltStatus?.position || '00';
-    
-    if (pos === '02' || pos === '03') {
-      await executeCommand({ action: 'transferStop' });
-      console.log(`✅ [BELT] At position ${pos} for weighing`);
-      return true;
-    }
-  }
-  
-  await executeCommand({ action: 'transferStop' });
-  console.log('✅ [BELT] Stopped for weighing');
-  return true;
-}
-
-async function moveBeltForwardToBin() {
-  console.log('🎯 [BELT] Pushing bottle INTO bin...');
-  
-  // Move forward to push bottle into bin
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.TRANSFER_BELT, 
-      type: '02',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  
-  // Push for 5 seconds (ensure bottle goes into bin)
-  await delay(5000);
-  
-  await executeCommand({ action: 'transferStop' });
-  console.log('✅ [BELT] Bottle pushed into bin');
-  
-  // Wait for bottle to drop
-  console.log('⏳ [BELT] Waiting 3s for bottle to drop...');
-  await delay(3000);
-}
-
-async function returnBeltToStart() {
-  console.log('🔄 [BELT] Returning to start...');
-  
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.TRANSFER_BELT, 
-      type: '01',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  
-  const startTime = Date.now();
-  while (Date.now() - startTime < 10000) {
-    await delay(300);
-    if (lastBeltStatus?.position === '01') {
-      await executeCommand({ action: 'transferStop' });
-      console.log('✅ [BELT] Back at start');
-      return true;
-    }
-  }
-  
-  await executeCommand({ action: 'transferStop' });
-  return true;
-}
-
-// ======= FULL CYCLE - CORRECT FLOW =======
+// ======= SIMPLIFIED CYCLE - NO DRUM OPERATIONS =======
 async function executeFullCycle() {
-  console.log('\n╔════════════════════════════════════════╗');
-  console.log('║      🚀 STARTING CORRECT FLOW         ║');
-  console.log('╚════════════════════════════════════════╝\n');
+  console.log('\n========================================');
+  console.log('🚀 STARTING CYCLE - STEPPER TO CRUSHER');
+  console.log('========================================');
+  console.log(`📍 Material: ${latestAIResult.materialType}`);
+  console.log(`⚖️ Weight: ${latestWeight.weight}g`);
+  console.log('========================================\n');
   
   try {
-    let stepperPos = '00';
-    
-    switch (latestAIResult.materialType) {
-      case 'PLASTIC_BOTTLE': stepperPos = '03'; break;
-      case 'METAL_CAN': stepperPos = '02'; break;
-      case 'GLASS': stepperPos = '01'; break;
-    }
-    
-    console.log(`📍 Material: ${latestAIResult.materialType} → Bin ${stepperPos}\n`);
-    
-    // STEP 1: Position sorter/stepper FIRST
-    console.log('[STEP 1/8] Positioning sorter...');
-    await executeCommand({ 
-      action: 'stepperMotor', 
-      params: { position: stepperPos }
-    });
-    await delay(3000);
-    console.log('✅ Sorter positioned\n');
-    
-    // STEP 2: Belt forward to weighing position
-    console.log('[STEP 2/8] Moving belt to weighing position...');
-    await moveBeltToWeighingPosition();
-    await delay(500);
-    console.log('');
-    
-    // STEP 3: Lift drum (weighing platform)
-    console.log('[STEP 3/8] Lifting drum to weigh bottle...');
-    await liftDrumForWeighing();
-    await delay(500);
-    console.log('');
-    
-    // STEP 4: Center bottle on drum
-    console.log('[STEP 4/8] Centering bottle on weighing platform...');
-    await centerBottleOnDrum();
-    await delay(500);
-    console.log('');
-    
-    // STEP 5: Get weight (bottle is now on raised drum)
-    console.log('[STEP 5/8] Getting weight from raised platform...');
-    console.log(`⚖️ Weight already obtained: ${latestWeight.weight}g\n`);
-    
-    // STEP 6: Lower drum (put bottle back on belt)
-    console.log('[STEP 6/8] Lowering drum to put bottle back on belt...');
-    await lowerDrumAfterWeighing();
+    // STEP 1: Gate Open
+    console.log('▶️ Step 1: Opening gate...');
+    await executeCommand({ action: 'openGate' });
     await delay(1000);
-    console.log('');
+    console.log('✅ Gate opened\n');
     
-    // STEP 7: Belt forward to push into bin
-    console.log('[STEP 7/8] Belt pushing bottle INTO bin...');
-    await moveBeltForwardToBin();
-    console.log('');
+    // STEP 2: Belt Forward to Weight Position
+    await beltForwardToWeightPosition();
+    await delay(500);
     
-    // STEP 8: Belt reverse to start
-    console.log('[STEP 8/8] Returning belt to start...');
-    await returnBeltToStart();
-    console.log('');
+    // STEP 3: Weight Confirmed (no drum operations)
+    console.log('▶️ Step 3: Weight confirmed');
+    console.log(`   ⚖️ ${latestWeight.weight}g\n`);
+    await delay(500);
     
-    // STEP 9: Compact (optional)
-    console.log('[EXTRA] Running compactor...');
-    await runCompactor();
-    console.log('');
+    // STEP 4: Belt Forward to Stepper Motor (white basket)
+    await beltForwardToSorter();
+    await delay(500);
     
-    // STEP 10: Reset sorter
-    console.log('[CLEANUP] Resetting sorter...');
-    await executeCommand({ 
-      action: 'stepperMotor', 
-      params: { position: '00' }
-    });
-    await delay(2000);
-    console.log('');
+    // STEP 5: STEPPER MOTOR ROTATES to dump bottle INTO CRUSHER
+    await dumpBottleIntoCrusher(latestAIResult.materialType);
+    await delay(500);
     
-    // STEP 11: Close gate
-    console.log('[CLEANUP] Closing gate...');
+    // STEP 6: Belt Reverse
+    await beltReverseToStart();
+    await delay(500);
+    
+    // STEP 7: Compactor
+    await compactorOperation();
+    await delay(500);
+    
+    // STEP 8: Reset stepper motor to home
+    await resetSorterToHome();
+    await delay(500);
+    
+    // STEP 9: Gate Close
+    console.log('▶️ Step 9: Closing gate...');
     await executeCommand({ action: 'closeGate' });
     await delay(1000);
-    await executeCommand({ action: 'gateMotorStop' });
+    console.log('✅ Gate closed\n');
     
-    console.log('\n╔════════════════════════════════════════╗');
-    console.log('║       ✅ CYCLE COMPLETE!              ║');
-    console.log('╚════════════════════════════════════════╝\n');
+    console.log('========================================');
+    console.log('✅ CYCLE COMPLETE - BOTTLE IN CRUSHER!');
+    console.log('========================================\n');
     
     mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
       material: latestAIResult.materialType,
       weight: latestWeight.weight,
-      binPosition: stepperPos,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      status: 'bottle_in_crusher'
     }));
     
     cycleInProgress = false;
@@ -348,62 +286,18 @@ async function executeFullCycle() {
     latestWeight = null;
     
   } catch (err) {
-    console.error('❌ Cycle failed:', err.message);
+    console.error('========================================');
+    console.error('❌ CYCLE FAILED:', err.message);
+    console.error('========================================\n');
     cycleInProgress = false;
     
-    // Emergency cleanup
-    await lowerDrumAfterWeighing();
-    await executeCommand({ action: 'transferStop' });
+    // Emergency stop all motors
+    console.log('🛑 Emergency stop...');
+    await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.belt.stop });
+    await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.compactor.stop });
+    await resetSorterToHome();
     await executeCommand({ action: 'closeGate' });
   }
-}
-
-async function runCompactor() {
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.COMPACTOR, 
-      type: '01',
-      deviceType: DEVICE_TYPE
-    }
-  });
-  await delay(6000);
-  
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: { 
-      motorId: MOTOR_CONFIG.COMPACTOR, 
-      type: '00',
-      deviceType: DEVICE_TYPE
-    }
-  });
-}
-
-// ======= GATE OPERATIONS =======
-async function safeOpenGate() {
-  console.log('🚪 Opening gate...');
-  
-  await lowerDrumAfterWeighing();
-  await delay(200);
-  
-  await executeCommand({ action: 'openGate' });
-  await delay(500);
-  await executeCommand({ action: 'gateMotorStop' });
-  
-  console.log('✅ Gate open');
-}
-
-async function safeTakePhoto() {
-  console.log('📸 Taking photo...');
-  
-  await lowerDrumAfterWeighing();
-  await delay(200);
-  
-  await executeCommand({ action: 'transferStop' });
-  await delay(200);
-  
-  await executeCommand({ action: 'takePhoto' });
-  console.log('✅ Photo captured');
 }
 
 // ======= WEBSOCKET =======
@@ -454,9 +348,13 @@ function connectWebSocket() {
       
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
+        const weightCoefficient = SYSTEM_CONFIG.applet.weightCoefficients[1];
+        const calibratedWeight = weightValue * (weightCoefficient / 1000);
         
         latestWeight = {
-          weight: weightValue,
+          weight: calibratedWeight,
+          rawWeight: weightValue,
+          coefficient: weightCoefficient,
           timestamp: new Date().toISOString()
         };
         
@@ -478,9 +376,7 @@ function connectWebSocket() {
         
         if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
           cycleInProgress = true;
-          await executeFullCycle();
-        } else if (latestWeight.weight <= 10 && latestWeight.weight > 0) {
-          console.log(`⚠️ Too light (${latestWeight.weight}g)`);
+          setTimeout(() => executeFullCycle(), 1000);
         }
         return;
       }
@@ -488,19 +384,12 @@ function connectWebSocket() {
       if (message.function === '03') {
         try {
           const motors = JSON.parse(message.data);
-          
           motors.forEach(motor => {
             motorStatusCache[motor.motorType] = motor;
             if (motor.motorType === '02') lastBeltStatus = motor;
           });
-          
-          const abnormals = motors.filter(m => m.state === 1 && !IGNORE_MOTOR_RECOVERY.includes(m.motorType));
-          
-          if (abnormals.length > 0 && !recoveryInProgress) {
-            console.log('🚨 Motor issue:', abnormals.map(m => m.motorTypeDesc).join(', '));
-          }
         } catch (err) {
-          console.error('❌ Parse error:', err.message);
+          // Ignore
         }
         return;
       }
@@ -509,9 +398,7 @@ function connectWebSocket() {
         const code = parseInt(message.data) || -1;
         if (code === 4 && autoCycleEnabled && !cycleInProgress) {
           console.log('👤 Object detected');
-          setTimeout(async () => {
-            await safeTakePhoto();
-          }, 1000);
+          setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
         }
         return;
       }
@@ -529,6 +416,7 @@ function connectWebSocket() {
   ws.on('error', (err) => console.error('❌ WS error:', err.message));
 }
 
+// ======= UTILITIES =======
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
   
@@ -545,8 +433,10 @@ function determineMaterialType(aiData) {
   return aiData.probability >= 0.5 ? 'PLASTIC_BOTTLE' : 'UNKNOWN';
 }
 
+// ======= EXECUTE COMMAND =======
 async function executeCommand(commandData) {
   const { action, params } = commandData;
+  const deviceType = 1;
   
   if (!currentModuleId && action !== 'getModuleId') {
     console.error('❌ No moduleId');
@@ -557,36 +447,10 @@ async function executeCommand(commandData) {
   
   if (action === 'openGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { 
-      moduleId: currentModuleId, 
-      motorId: '01', 
-      type: '03', 
-      deviceType: DEVICE_TYPE
-    };
+    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType };
   } else if (action === 'closeGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { 
-      moduleId: currentModuleId, 
-      motorId: '01', 
-      type: '00', 
-      deviceType: DEVICE_TYPE
-    };
-  } else if (action === 'gateMotorStop') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { 
-      moduleId: currentModuleId, 
-      motorId: '01', 
-      type: '00', 
-      deviceType: DEVICE_TYPE
-    };
-  } else if (action === 'transferStop') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { 
-      moduleId: currentModuleId, 
-      motorId: MOTOR_CONFIG.TRANSFER_BELT, 
-      type: '00', 
-      deviceType: DEVICE_TYPE
-    };
+    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType };
   } else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
     apiPayload = { moduleId: currentModuleId, type: '00' };
@@ -596,25 +460,17 @@ async function executeCommand(commandData) {
   } else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
-  } else if (action === 'safeTakePhoto') {
-    return await safeTakePhoto();
   } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    apiPayload = { 
-      moduleId: currentModuleId, 
-      type: params?.position || '00', 
-      deviceType: DEVICE_TYPE
-    };
+    apiPayload = { moduleId: currentModuleId, type: params?.position || '01', deviceType };
   } else if (action === 'customMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = {
       moduleId: params?.moduleId || currentModuleId,
       motorId: params?.motorId,
       type: params?.type,
-      deviceType: params?.deviceType || DEVICE_TYPE
+      deviceType: params?.deviceType || deviceType
     };
-  } else if (action === 'safeOpenGate') {
-    return await safeOpenGate();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -648,6 +504,7 @@ async function requestModuleId() {
   }
 }
 
+// ======= MQTT =======
 const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
   username: MQTT_USERNAME,
   password: MQTT_PASSWORD,
@@ -675,7 +532,7 @@ mqttClient.on('message', async (topic, message) => {
       console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ON' : 'OFF'}`);
       
       if (autoCycleEnabled && currentModuleId) {
-        await executeCommand({ action: 'safeOpenGate' });
+        await executeCommand({ action: 'openGate' });
       } else if (!autoCycleEnabled && currentModuleId) {
         await executeCommand({ action: 'closeGate' });
       }
@@ -684,10 +541,6 @@ mqttClient.on('message', async (topic, message) => {
     
     if (topic.includes('/commands')) {
       console.log(`📩 Command: ${payload.action}`);
-      
-      if (payload.action === 'takePhoto') {
-        payload.action = 'safeTakePhoto';
-      }
       
       if (!currentModuleId) {
         pendingCommands.set(Date.now().toString(), payload);
@@ -709,24 +562,25 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-console.log('╔════════════════════════════════════════╗');
-console.log('║  🚀 RVM AGENT v4.1 - CORRECT FLOW    ║');
-console.log('╚════════════════════════════════════════╝');
+console.log('========================================');
+console.log('🚀 RVM AGENT v6.8 - STEPPER TO CRUSHER');
 console.log(`📱 Device: ${DEVICE_ID}`);
-console.log('');
-console.log('✨ CORRECT FLOW (From Manufacturer):');
+console.log('========================================');
+console.log('✅ SIMPLIFIED SEQUENCE:');
 console.log('   1. Gate Open');
-console.log('   2. Belt Forward → weighing position');
-console.log('   3. Drum Lift & Center → lifts to weigh');
-console.log('   4. Weight Detection → weighs on drum');
-console.log('   5. Drum Down → back to belt');
-console.log('   6. Belt Forward to Bin → pushes in');
-console.log('   7. Belt Reverse → returns to start');
-console.log('   8. Gate Close');
-console.log('');
-console.log('🎯 KEY INSIGHT:');
-console.log('   Drum = WEIGHING PLATFORM (not pusher!)');
-console.log('   Belt = Does the final push into bin');
-console.log('');
-console.log('🤖 curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
-console.log('╔════════════════════════════════════════╗\n');
+console.log('   2. Belt Forward → Weight position');
+console.log('   3. Weight Detection');
+console.log('   4. Belt Forward → White basket');
+console.log('   5. Stepper Motor ROTATES basket 🔄');
+console.log('      → Bottle falls INTO CRUSHER!');
+console.log('   6. Belt Reverse');
+console.log('   7. Compactor');
+console.log('   8. Reset basket to home');
+console.log('   9. Gate Close');
+console.log('========================================');
+console.log('🔧 KEY IMPROVEMENTS:');
+console.log('   • Removed unnecessary drum operations');
+console.log('   • Bottle now goes directly to white basket');
+console.log('   • Stepper motor dumps bottle INTO CRUSHER');
+console.log('   • Using correct motor IDs from doc 5.5-5.8');
+console.log('========================================\n');
