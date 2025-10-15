@@ -1,43 +1,53 @@
-// RVM Agent v4.0 - WITH APPLET CONFIGURATIONS
-// Based on RVM configuration applet settings from screenshots
-// Save as: agent-v4.0-applet-config.js
+// RVM Agent v5.0 - DRUM/ROLLER SYSTEM
+// Based on manufacturer specifications for drum/roller RVM
+// Save as: agent-v5.0-drum-system.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-// ======= APPLET CONFIGURATIONS (FROM SCREENSHOTS) =======
-const APPLET_CONFIG = {
-  // Motor directions (from screenshot: 开门电机=反方向, 传送电机=反方向, etc.)
-  motorDirections: {
-    '01': 'reverse',    // 开门电机 - 反方向
-    '02': 'reverse',    // 传送电机 - 反方向  
-    '03': 'forward',    // 压板电机 - 正方向
-    '04': 'reverse',    // 翻板电机 - 反方向
-    '05': 'reverse',    // 分装电机 - 反方向
-    '06': 'forward'     // 副板开/尾机 - 正方向
+// ======= DRUM/ROLLER CONFIGURATION =======
+const DRUM_CONFIG = {
+  // Drum/Roller motor commands from manufacturer
+  drumRise: {
+    moduleId: "09",
+    motorId: "07", 
+    type: "01",
+    deviceType: "5"
   },
-  
-  // Weight coefficients (from screenshot)
+  drumDescend: {
+    moduleId: "09",
+    motorId: "07",
+    type: "03", 
+    deviceType: "5"
+  },
+  drumRoll: {
+    moduleId: "09", 
+    motorId: "03",
+    type: "01",
+    deviceType: "5"
+  },
+  drumStop: {
+    moduleId: "09",
+    motorId: "03", 
+    type: "00",
+    deviceType: "5"
+  }
+};
+
+// ======= APPLET CONFIGURATIONS =======
+const APPLET_CONFIG = {
   weightCoefficients: {
     1: 988,
     2: 942, 
     3: 942,
     4: 942
   },
-  
-  // Motor timeout settings (from screenshot: /10000)
   timeouts: {
-    motor: 10000,       // 电机超时时间 /10000
-    transfer: 10000,    // 传送电机移动时间 /10000
-    pressPlate: 10000   // 压板电机移动时间 /10000
-  },
-  
-  // Sorter motor timing (from screenshot)
-  sorterTiming: {
-    leftToMiddle: 360,  // 分装电机左-中时间 /360
-    rightToMiddle: 45   // 分装电机右-中时间 /45°
+    motor: 10000,
+    transfer: 10000,
+    pressPlate: 10000
   }
 };
 
@@ -60,91 +70,112 @@ let recoveryInProgress = false;
 let autoCycleEnabled = false;
 let cycleInProgress = false;
 let calibrationAttempts = 0;
-const IGNORE_MOTOR_RECOVERY = ['05'];
 let ws = null;
-let lastBeltStatus = null;
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= APPLET-COMPATIBLE MOTOR CONTROL =======
-async function transferForwardToBin() {
-  console.log('🎯 Transfer forward TO BIN (Applet compatible)');
-  
-  // Based on applet: 传送电机移动时间 /10000 = 10 seconds
-  const transferTime = APPLET_CONFIG.timeouts.transfer;
-  
-  console.log(`➡️ Continuous forward (${transferTime}ms)...`);
+// ======= DRUM/ROLLER CONTROL =======
+async function drumRise() {
+  console.log('🔼 Drum rising...');
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: '02', type: '02' }  // Forward to limit
+    params: DRUM_CONFIG.drumRise
   });
-  
-  // Wait for the configured transfer time OR until position reached
-  const startTime = Date.now();
-  let positionReached = false;
-  
-  while (Date.now() - startTime < transferTime) {
-    await delay(500);
-    
-    const pos = lastBeltStatus?.position || '00';
-    console.log(`⏳ Belt position: ${pos}`);
-    
-    // Stop when middle or end position reached
-    if (pos === '02' || pos === '03') {
-      console.log(`✅ Reached position ${pos} - stopping`);
-      await executeCommand({ action: 'transferStop' });
-      positionReached = true;
-      break;
-    }
-  }
-  
-  // Safety stop after timeout
-  if (!positionReached) {
-    console.log(`⏰ Transfer timeout after ${transferTime}ms - stopping`);
-    await executeCommand({ action: 'transferStop' });
-  }
-  
-  return positionReached;
+  await delay(3000); // Wait for drum to fully rise
+  console.log('✅ Drum raised');
 }
 
-async function transferReverseToStart() {
-  console.log('🔄 Transfer reverse to START');
-  
+async function drumDescend() {
+  console.log('🔽 Drum descending...');
   await executeCommand({ 
     action: 'customMotor', 
-    params: { motorId: '02', type: '01' }  // Reverse
+    params: DRUM_CONFIG.drumDescend
   });
-  
-  const startTime = Date.now();
-  while (Date.now() - startTime < 8000) {
-    await delay(500);
-    
-    if (lastBeltStatus?.position === '01') {
-      console.log('✅ Back at start position');
-      await executeCommand({ action: 'transferStop' });
-      return true;
-    }
-  }
-  
-  await executeCommand({ action: 'transferStop' });
-  return true;
+  await delay(3000); // Wait for drum to fully descend
+  console.log('✅ Drum descended');
 }
 
+async function drumRollForward() {
+  console.log('🔄 Drum rolling forward...');
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: DRUM_CONFIG.drumRoll
+  });
+  // Roll for configured time (like applet: 10000ms)
+  await delay(APPLET_CONFIG.timeouts.transfer);
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: DRUM_CONFIG.drumStop
+  });
+  console.log('✅ Drum roll complete');
+}
+
+async function drumRollReverse() {
+  console.log('🔄 Drum rolling reverse...');
+  // For reverse, we might need to check if there's a reverse command
+  // If not, we can use the same roll command with different timing
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: DRUM_CONFIG.drumRoll
+  });
+  await delay(5000); // Shorter time for reverse
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: DRUM_CONFIG.drumStop
+  });
+  console.log('✅ Drum reverse complete');
+}
+
+// ======= BOTTLE TRANSPORT WITH DRUM =======
+async function transportBottleToBin() {
+  console.log('🎯 Transporting bottle using drum system...');
+  
+  // Step 1: Ensure drum is in start position (descended)
+  await drumDescend();
+  await delay(1000);
+  
+  // Step 2: Roll drum to move bottle forward
+  await drumRollForward();
+  await delay(1000);
+  
+  // Step 3: Raise drum to position bottle for pusher
+  await drumRise();
+  await delay(1000);
+  
+  console.log('✅ Bottle transported to bin position');
+}
+
+async function resetDrumSystem() {
+  console.log('🔄 Resetting drum system...');
+  
+  // Stop any rolling
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: DRUM_CONFIG.drumStop
+  });
+  
+  // Ensure drum is descended
+  await drumDescend();
+  await delay(1000);
+  
+  console.log('✅ Drum system reset');
+}
+
+// ======= PRESS PLATE CONTROL =======
 async function pressPlateOperation() {
   console.log('💪 Press plate operation');
   
-  // Press plate DOWN (type 03) - using applet timing
+  // Press plate DOWN
   await executeCommand({ 
     action: 'customMotor', 
     params: { motorId: '03', type: '03' }
   });
   
-  // Wait for press plate movement (using applet timing)
   await delay(APPLET_CONFIG.timeouts.pressPlate);
   
-  // Press plate UP (type 01)
+  // Press plate UP
   await executeCommand({ 
     action: 'customMotor', 
     params: { motorId: '03', type: '01' }
@@ -164,7 +195,7 @@ async function pressPlateOperation() {
 async function compactorOperation(materialType) {
   console.log(`🔨 Compactor for ${materialType}`);
   
-  const compactorMotor = '04'; // Plastic compactor
+  const compactorMotor = '04';
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -181,9 +212,9 @@ async function compactorOperation(materialType) {
   console.log('✅ Compactor operation complete');
 }
 
-// ======= FULL CYCLE WITH APPLET SETTINGS =======
+// ======= FULL CYCLE WITH DRUM SYSTEM =======
 async function executeFullCycle() {
-  console.log('\n🚀 Starting cycle (Applet compatible)...');
+  console.log('\n🚀 Starting cycle (Drum System)...');
   
   try {
     let stepperPos = '00';
@@ -204,16 +235,16 @@ async function executeFullCycle() {
     });
     await delay(3000);
     
-    // Step 2: Transfer bottle to bin (USING APPLET TIMING)
-    await transferForwardToBin();
+    // Step 2: Transport bottle using DRUM SYSTEM
+    await transportBottleToBin();
     await delay(1000);
     
     // Step 3: Push bottle into chute
     await pressPlateOperation();
     await delay(1000);
     
-    // Step 4: Return belt to start
-    await transferReverseToStart();
+    // Step 4: Reset drum system
+    await resetDrumSystem();
     await delay(1000);
     
     // Step 5: Run compactor
@@ -250,11 +281,34 @@ async function executeFullCycle() {
     cycleInProgress = false;
     
     // Emergency stop
-    await executeCommand({ action: 'transferStop' });
+    await resetDrumSystem();
     await executeCommand({ action: 'customMotor', params: { motorId: '03', type: '00' } });
     await executeCommand({ action: 'customMotor', params: { motorId: '04', type: '00' } });
     await executeCommand({ action: 'closeGate' });
   }
+}
+
+// ======= DRUM TEST FUNCTIONS =======
+async function testDrumOperations() {
+  console.log('\n🧪 Testing Drum Operations...');
+  
+  console.log('1. Testing drum descend...');
+  await drumDescend();
+  await delay(2000);
+  
+  console.log('2. Testing drum roll forward...');
+  await drumRollForward();
+  await delay(2000);
+  
+  console.log('3. Testing drum rise...');
+  await drumRise();
+  await delay(2000);
+  
+  console.log('4. Testing drum descend again...');
+  await drumDescend();
+  await delay(2000);
+  
+  console.log('✅ Drum tests complete');
 }
 
 // ======= WEBSOCKET =======
@@ -306,8 +360,8 @@ function connectWebSocket() {
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         
-        // Apply weight coefficient (from applet configuration)
-        const weightCoefficient = APPLET_CONFIG.weightCoefficients[1]; // Using weighter 1
+        // Apply weight coefficient
+        const weightCoefficient = APPLET_CONFIG.weightCoefficients[1];
         const calibratedWeight = weightValue * (weightCoefficient / 1000);
         
         latestWeight = {
@@ -317,7 +371,7 @@ function connectWebSocket() {
           timestamp: new Date().toISOString()
         };
         
-        console.log(`⚖️ Weight: ${latestWeight.weight}g (raw: ${latestWeight.rawWeight}g, coeff: ${weightCoefficient})`);
+        console.log(`⚖️ Weight: ${latestWeight.weight}g (raw: ${latestWeight.rawWeight}g)`);
         
         mqttClient.publish(`rvm/${DEVICE_ID}/weight_result`, JSON.stringify(latestWeight));
         
@@ -343,12 +397,9 @@ function connectWebSocket() {
       if (message.function === '03') {
         try {
           const motors = JSON.parse(message.data);
-          
           motors.forEach(motor => {
             motorStatusCache[motor.motorType] = motor;
-            if (motor.motorType === '02') lastBeltStatus = motor;
           });
-          
         } catch (err) {
           console.error('❌ Parse error:', err.message);
         }
@@ -412,9 +463,6 @@ async function executeCommand(commandData) {
   } else if (action === 'closeGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType };
-  } else if (action === 'transferStop') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '02', type: '00', deviceType };
   } else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
     apiPayload = { moduleId: currentModuleId, type: '00' };
@@ -433,8 +481,16 @@ async function executeCommand(commandData) {
       moduleId: params?.moduleId || currentModuleId,
       motorId: params?.motorId,
       type: params?.type,
-      deviceType
+      deviceType: params?.deviceType || deviceType
     };
+  } else if (action === 'drumRise') {
+    return await drumRise();
+  } else if (action === 'drumDescend') {
+    return await drumDescend();
+  } else if (action === 'drumRoll') {
+    return await drumRollForward();
+  } else if (action === 'testDrum') {
+    return await testDrumOperations();
   } else {
     console.error('⚠️ Unknown action:', action);
     return;
@@ -527,16 +583,17 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v4.0 - APPLET COMPATIBLE');
+console.log('🚀 RVM AGENT v5.0 - DRUM/ROLLER SYSTEM');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('⚙️ APPLET CONFIGURATIONS LOADED:');
-console.log('   Motor Directions: Reverse for gate/transfer motors');
-console.log('   Weight Coefficients: 988, 942, 942, 942');
-console.log('   Transfer Time: 10000ms');
-console.log('   Press Plate Time: 10000ms');
+console.log('🎯 DRUM SYSTEM COMMANDS:');
+console.log('   Rise:    moduleId:09, motorId:07, type:01');
+console.log('   Descend: moduleId:09, motorId:07, type:03'); 
+console.log('   Roll:    moduleId:09, motorId:03, type:01');
 console.log('========================================');
-console.log('🤖 USAGE:');
-console.log('   Enable: POST /api/rvm/RVM-3101/auto/enable');
-console.log('   Test: POST /api/rvm/RVM-3101/transfer/forward');
+console.log('🧪 TEST COMMANDS:');
+console.log('   POST /api/rvm/RVM-3101/commands -d \'{"action":"testDrum"}\'');
+console.log('   POST /api/rvm/RVM-3101/commands -d \'{"action":"drumRise"}\'');
+console.log('   POST /api/rvm/RVM-3101/commands -d \'{"action":"drumDescend"}\'');
+console.log('   POST /api/rvm/RVM-3101/commands -d \'{"action":"drumRoll"}\'');
 console.log('========================================\n');
