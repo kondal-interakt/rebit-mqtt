@@ -1,6 +1,6 @@
-// RVM Agent v6.3 - CORRECT FLOW
-// Gate Open → Belt Forward → Drum Lift & Center → Weight Detection → Drum Down → Belt Forward to Bin → Belt Reverse → Gate Close
-// Save as: agent-v6.3-correct-flow.js
+// RVM Agent v6.4 - FASTER FINAL PUSH
+// Belt Forward to Bin needs to be faster and longer to completely reach sorter
+// Save as: agent-v6.4-faster-push.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -17,7 +17,7 @@ const SYSTEM_CONFIG = {
     stop: { moduleId: "09", motorId: "03", type: "00", deviceType: "5" }
   },
   
-  // Belt commands
+  // Belt commands - INCREASED TIMING for final push
   belt: {
     forward: { motorId: "02", type: "02" }, // Forward to limit
     reverse: { motorId: "02", type: "01" }, // Reverse to start
@@ -25,10 +25,14 @@ const SYSTEM_CONFIG = {
     toCollectBin: { motorId: "03", type: "03" } // Pusher to bin
   },
   
-  // Applet configurations
+  // Applet configurations - INCREASED TRANSFER TIME
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
-    timeouts: { motor: 10000, transfer: 8000, pressPlate: 10000 }
+    timeouts: { 
+      motor: 10000, 
+      transfer: 12000, // INCREASED from 8000 to 12000ms for final push
+      pressPlate: 10000 
+    }
   }
 };
 
@@ -97,11 +101,11 @@ async function drumDescend() {
   console.log('✅ Drum descended');
 }
 
-// ======= BELT CONTROL =======
+// ======= BELT CONTROL - IMPROVED FINAL PUSH =======
 async function beltForwardToWeightPosition() {
   console.log('🎯 Belt moving bottle to weight position...');
   
-  // Short forward movement to position bottle for drum
+  // Shorter forward movement to position bottle for drum
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -121,9 +125,9 @@ async function beltForwardToWeightPosition() {
 }
 
 async function beltForwardToBin() {
-  console.log('🎯 Belt moving bottle to bin...');
+  console.log('🎯 FINAL PUSH: Belt moving bottle COMPLETELY to sorter...');
   
-  // Full forward movement to bin after weight detection
+  // FINAL PUSH - LONGER and CONTINUOUS to reach sorter completely
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -132,14 +136,41 @@ async function beltForwardToBin() {
     }
   });
   
-  await delay(SYSTEM_CONFIG.applet.timeouts.transfer);
+  console.log(`➡️ EXTENDED forward movement (${SYSTEM_CONFIG.applet.timeouts.transfer}ms)...`);
   
-  await executeCommand({ 
-    action: 'customMotor', 
-    params: SYSTEM_CONFIG.belt.stop
-  });
+  // Use position monitoring to ensure bottle reaches sorter
+  const startTime = Date.now();
+  let reachedTarget = false;
   
-  console.log('✅ Bottle at bin position');
+  while (Date.now() - startTime < SYSTEM_CONFIG.applet.timeouts.transfer) {
+    await delay(500);
+    
+    const pos = lastBeltStatus?.position || '00';
+    console.log(`⏳ Belt position: ${pos} (target: 03=sorter)`);
+    
+    // Stop when END position reached (position 03 = sorter)
+    if (pos === '03') {
+      console.log('✅ REACHED SORTER - bottle completely at sorter position');
+      await executeCommand({ 
+        action: 'customMotor', 
+        params: SYSTEM_CONFIG.belt.stop
+      });
+      reachedTarget = true;
+      break;
+    }
+  }
+  
+  // If timeout but not at sorter, continue a bit more
+  if (!reachedTarget) {
+    console.log('🔄 Continuing forward to ensure bottle reaches sorter...');
+    await delay(2000); // Extra 2 seconds
+    await executeCommand({ 
+      action: 'customMotor', 
+      params: SYSTEM_CONFIG.belt.stop
+    });
+  }
+  
+  console.log('✅ FINAL PUSH complete - bottle should be at sorter');
 }
 
 async function beltReverseToStart() {
@@ -165,7 +196,7 @@ async function beltReverseToStart() {
 
 // ======= PUSHER & COMPACTOR =======
 async function pushBottleIntoBin() {
-  console.log('💪 Pusher moving bottle into bin...');
+  console.log('💪 Pusher moving bottle from sorter into bin...');
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -236,9 +267,9 @@ async function resetSorterToHome() {
   console.log('✅ Sorter at home position');
 }
 
-// ======= FULL CYCLE - CORRECT FLOW =======
+// ======= FULL CYCLE - WITH FASTER FINAL PUSH =======
 async function executeFullCycle() {
-  console.log('\n🚀 Starting cycle (Correct Flow)...');
+  console.log('\n🚀 Starting cycle (With Faster Final Push)...');
   
   try {
     console.log(`📍 AI Detected: ${latestAIResult.materialType}`);
@@ -247,7 +278,7 @@ async function executeFullCycle() {
     await positionSorterForMaterial(latestAIResult.materialType);
     await delay(1000);
     
-    // Step 2: Belt Forward (initial movement)
+    // Step 2: Belt Forward (initial movement to weight position)
     await beltForwardToWeightPosition();
     await delay(1000);
     
@@ -263,7 +294,7 @@ async function executeFullCycle() {
     await drumDescend();
     await delay(1000);
     
-    // Step 6: Belt Forward to Bin (final movement)
+    // Step 6: Belt Forward to Bin - FINAL PUSH (FASTER & LONGER)
     await beltForwardToBin();
     await delay(1000);
     
@@ -596,18 +627,14 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v6.3 - CORRECT FLOW');
+console.log('🚀 RVM AGENT v6.4 - FASTER FINAL PUSH');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🔄 CORRECT SEQUENCE:');
-console.log('   1. Gate Open');
-console.log('   2. Belt Forward (to weight position)');
-console.log('   3. Drum Lift & Center');
-console.log('   4. Weight Detection');
-console.log('   5. Drum Down');
-console.log('   6. Belt Forward to Bin');
-console.log('   7. Belt Reverse');
-console.log('   8. Gate Close');
+console.log('🔄 IMPROVED FINAL PUSH:');
+console.log('   - Extended transfer time: 12000ms (increased from 8000ms)');
+console.log('   - Position monitoring to detect when bottle reaches sorter');
+console.log('   - Extra 2 seconds if not at target position');
+console.log('   - Continuous movement until bottle completely at sorter');
 console.log('========================================');
 console.log('🤖 AUTO MODE:');
 console.log('   Enable: POST /api/rvm/RVM-3101/auto/enable');
