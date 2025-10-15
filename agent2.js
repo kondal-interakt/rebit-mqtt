@@ -1,50 +1,54 @@
-// RVM Agent v7.1 - FINAL BASED ON ACTUAL CONFIGURATION
-// Matches actual machine settings: Step Motor 2000 (rotate), 20000 (init)
-// NO DRUM - Belt forward increased for better positioning
-// Save as: agent-v7.1-final-config.js
+// RVM Agent v7.2 - FIXED STEPPER MOTOR POSITIONS
+// CRITICAL FIX: Using correct position codes (00-03) not step counts
+// Belt forward increased to 8000ms
+// Save as: agent-v7.2-fixed-stepper.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
 
-// ======= SYSTEM CONFIGURATION (FROM ACTUAL MACHINE) =======
+// ======= SYSTEM CONFIGURATION =======
 const SYSTEM_CONFIG = {
   // Belt commands
   belt: {
-    forward: { motorId: "02", type: "02" },      // Belt forward
-    reverse: { motorId: "02", type: "01" },      // Belt reverse
-    stop: { motorId: "02", type: "00" }          // Belt stop
+    forward: { motorId: "02", type: "02" },
+    reverse: { motorId: "02", type: "01" },
+    stop: { motorId: "02", type: "00" }
   },
   
-  // Pusher command (Motor 03 - pushes bottle to white basket)
+  // Pusher command (Motor 03)
   pusher: {
-    toRoller: { motorId: "03", type: "03" },     // Push to roller/basket
-    stop: { motorId: "03", type: "00" }          // Stop pusher
+    toRoller: { motorId: "03", type: "03" },
+    stop: { motorId: "03", type: "00" }
   },
   
-  // Compactor commands (Plastic compactor from config screen)
+  // Compactor commands
   compactor: {
-    start: { motorId: "04", type: "01" },        // Plastic compactor start
-    stop: { motorId: "04", type: "00" }          // Plastic compactor stop
+    start: { motorId: "04", type: "01" },
+    stop: { motorId: "04", type: "00" }
   },
   
-  // Stepper Motor (from config: 2000 for rotate, 20000 for init)
+  // STEPPER MOTOR POSITION CODES (from documentation section 13)
+  // NOTE: 2000/20000 in config are step counts, not position codes!
   stepper: {
-    rotate: '2000',      // Step Motor Move from config screen
-    initialize: '20000'  // Target 0x00000 = 20000 decimal (initialization)
+    positions: {
+      initialization: '00',   // Full reset
+      home: '01',            // Return to origin (flat basket)
+      metalCan: '02',        // Tilt for metal can
+      plasticBottle: '03'    // Tilt for plastic bottle
+    }
   },
   
   // Timing configurations
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
     timeouts: { 
-      beltForward: 5000,         // INCREASED - belt moves more towards machine
-      pusherToRoller: 5000,      // Pusher pushes bottle to white basket
-      stepperRotate: 3000,       // Stepper motor rotation time
-      stepperInitialize: 4000,   // Stepper initialization time (20000 steps takes longer)
-      beltReverse: 8000,         // Belt reverse to start
-      compactor: 6000            // Compactor crush time
+      beltForward: 8000,         // INCREASED to 8000ms as requested
+      pusherToRoller: 5000,      
+      stepperRotate: 4000,       // Time for stepper to complete rotation
+      beltReverse: 8000,         
+      compactor: 6000            
     }
   }
 };
@@ -81,7 +85,7 @@ async function beltForwardToWeight() {
     params: SYSTEM_CONFIG.belt.forward
   });
   
-  console.log(`   ⏳ Moving for ${SYSTEM_CONFIG.applet.timeouts.beltForward}ms (increased for better positioning)...`);
+  console.log(`   ⏳ Moving for ${SYSTEM_CONFIG.applet.timeouts.beltForward}ms (INCREASED to 8000ms)...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.beltForward);
   
   await executeCommand({ 
@@ -93,11 +97,9 @@ async function beltForwardToWeight() {
   await delay(500);
 }
 
-// ======= STEP 2 & 3: WEIGHT + AI DETECTION (automatic) =======
-
-// ======= STEP 4: PUSHER - PUSH TO ROLLER (WHITE BASKET) =======
+// ======= STEP 4: PUSHER - PUSH TO ROLLER =======
 async function pushBottleToRoller() {
-  console.log('▶️ Step 4: Transfer forward to roller (Motor 03 pushes bottle to white basket)...');
+  console.log('▶️ Step 4: Transfer forward to roller (Motor 03)...');
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -112,43 +114,49 @@ async function pushBottleToRoller() {
     params: SYSTEM_CONFIG.pusher.stop
   });
   
-  console.log('✅ Bottle on white basket (roller)!\n');
+  console.log('✅ Bottle on white basket!\n');
   await delay(1000);
 }
 
-// ======= STEP 5: STEPPER MOTOR - ROTATE TO DUMP =======
+// ======= STEP 5: STEPPER MOTOR - ROTATE TO DUMP (FIXED!) =======
 async function stepperRotateAndDump(materialType) {
-  console.log('▶️ Step 5: Stepping motor rolling the roller (2000 steps)...');
+  console.log('▶️ Step 5: Stepping motor rotating to dump bottle...');
   
-  let sorterPosition = SYSTEM_CONFIG.stepper.rotate; // Use 2000 from config
+  // Use CORRECT position codes from documentation
+  let positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // Default '03'
   
   switch (materialType) {
     case 'PLASTIC_BOTTLE': 
-      console.log('   🔵 Rotating to PLASTIC bin (2000 steps)');
+      positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03'
+      console.log('   🔵 PLASTIC: Using position code 03');
       break;
     case 'METAL_CAN': 
-      console.log('   🟡 Rotating to METAL bin (2000 steps)');
+      positionCode = SYSTEM_CONFIG.stepper.positions.metalCan; // '02'
+      console.log('   🟡 METAL: Using position code 02');
       break;
     case 'GLASS': 
-      console.log('   🟢 Rotating to GLASS bin (2000 steps)');
+      positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03' (fallback)
+      console.log('   🟢 GLASS: Using position code 03');
       break;
   }
   
+  console.log(`   🔧 Sending stepper command: position=${positionCode}`);
+  
   await executeCommand({ 
     action: 'stepperMotor', 
-    params: { position: sorterPosition }
+    params: { position: positionCode }
   });
   
-  console.log('   ⏳ Stepper rotating (dumping bottle)...');
+  console.log('   ⏳ Stepper rotating (internal 2000 steps)...');
   await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
   
-  console.log('✅ Bottle dumped into bin!\n');
+  console.log('✅ Stepper rotated! Bottle should be dumped!\n');
   await delay(1000);
 }
 
 // ======= STEP 6: COMPACTOR =======
 async function compactorCrush() {
-  console.log('▶️ Step 6: Plastic compactor starting...');
+  console.log('▶️ Step 6: Compactor starting...');
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -169,7 +177,7 @@ async function compactorCrush() {
 
 // ======= STEP 7: BELT REVERSE =======
 async function beltReverseToStart() {
-  console.log('▶️ Step 7: Belt returning to start position...');
+  console.log('▶️ Step 7: Belt returning to start...');
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -187,26 +195,31 @@ async function beltReverseToStart() {
   await delay(500);
 }
 
-// ======= STEP 8: RESET STEPPER (INITIALIZE) =======
-async function stepperInitialize() {
-  console.log('▶️ Step 8: Initializing stepper motor (20000 steps to home)...');
+// ======= STEP 8: RESET STEPPER TO HOME (FIXED!) =======
+async function stepperResetToHome() {
+  console.log('▶️ Step 8: Resetting stepper to home position...');
+  
+  // Use position code '01' for home (not '20000')
+  const homePosition = SYSTEM_CONFIG.stepper.positions.home; // '01'
+  
+  console.log(`   🔧 Sending stepper reset: position=${homePosition}`);
   
   await executeCommand({ 
     action: 'stepperMotor', 
-    params: { position: SYSTEM_CONFIG.stepper.initialize } // 20000 from config
+    params: { position: homePosition }
   });
   
-  console.log('   ⏳ Initializing (this takes longer - 20000 steps)...');
-  await delay(SYSTEM_CONFIG.applet.timeouts.stepperInitialize);
+  console.log('   ⏳ Resetting to home (internal 20000 steps)...');
+  await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
   
-  console.log('✅ Stepper initialized (home position)\n');
+  console.log('✅ Stepper at home (flat basket)\n');
   await delay(500);
 }
 
-// ======= FULL CYCLE - BASED ON ACTUAL CONFIG =======
+// ======= FULL CYCLE =======
 async function executeFullCycle() {
   console.log('\n========================================');
-  console.log('🚀 STARTING CYCLE - ACTUAL CONFIG');
+  console.log('🚀 STARTING CYCLE - FIXED STEPPER');
   console.log('========================================');
   console.log(`📍 Material: ${latestAIResult.materialType}`);
   console.log(`⚖️ Weight: ${latestWeight.weight}g`);
@@ -219,18 +232,18 @@ async function executeFullCycle() {
     await delay(1000);
     console.log('✅ Gate opened\n');
     
-    // STEP 1: Belt Forward to Weight (INCREASED - moves more towards machine)
+    // STEP 1: Belt Forward (8000ms)
     await beltForwardToWeight();
     
-    // STEP 2 & 3: Weight & AI Detection (already done)
-    console.log('✅ Step 2: Weight detected:', latestWeight.weight, 'g');
-    console.log('✅ Step 3: AI detected:', latestAIResult.materialType, '\n');
+    // STEP 2 & 3: Weight & AI (already done)
+    console.log('✅ Step 2: Weight:', latestWeight.weight, 'g');
+    console.log('✅ Step 3: AI:', latestAIResult.materialType, '\n');
     await delay(500);
     
-    // STEP 4: Push bottle to Roller (Motor 03 - white basket)
+    // STEP 4: Push to Roller
     await pushBottleToRoller();
     
-    // STEP 5: Stepper Motor Rotate (2000 steps from config)
+    // STEP 5: Stepper Rotate (FIXED - using position codes!)
     await stepperRotateAndDump(latestAIResult.materialType);
     
     // STEP 6: Compactor
@@ -239,8 +252,8 @@ async function executeFullCycle() {
     // STEP 7: Belt Reverse
     await beltReverseToStart();
     
-    // STEP 8: Stepper Initialize (20000 steps from config)
-    await stepperInitialize();
+    // STEP 8: Stepper Reset (FIXED - using position code!)
+    await stepperResetToHome();
     
     // STEP 9: Gate Close
     console.log('▶️ Step 9: Closing gate...');
@@ -273,7 +286,7 @@ async function executeFullCycle() {
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.belt.stop });
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.pusher.stop });
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.compactor.stop });
-    await stepperInitialize();
+    await stepperResetToHome();
     await executeCommand({ action: 'closeGate' });
   }
 }
@@ -427,9 +440,15 @@ async function executeCommand(commandData) {
     apiPayload = {};
   } else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
+    
+    // CRITICAL: Use position code directly (00, 01, 02, 03)
+    const positionCode = params?.position || '01';
+    
+    console.log(`   🔧 API Call: stepMotorSelect with position="${positionCode}"`);
+    
     apiPayload = { 
       moduleId: currentModuleId, 
-      type: params?.position || SYSTEM_CONFIG.stepper.initialize, 
+      type: positionCode,  // Send position code as 'type' parameter
       deviceType 
     };
   } else if (action === 'customMotor') {
@@ -446,6 +465,8 @@ async function executeCommand(commandData) {
   }
   
   try {
+    console.log(`   📡 Sending to ${apiUrl.split('/').pop()}: ${JSON.stringify(apiPayload)}`);
+    
     await axios.post(apiUrl, apiPayload, {
       timeout: 10000,
       headers: { 'Content-Type': 'application/json' }
@@ -532,23 +553,17 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v7.1 - ACTUAL CONFIG');
+console.log('🚀 RVM AGENT v7.2 - FIXED STEPPER!');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('✅ BASED ON ACTUAL MACHINE SETTINGS:');
-console.log('   • Stepper: 2000 steps (rotate/dump)');
-console.log('   • Stepper: 20000 steps (initialize)');
-console.log('   • NO DRUM operations (removed)');
-console.log('   • Belt forward: 5000ms (increased)');
+console.log('🔧 CRITICAL FIX:');
+console.log('   ❌ OLD: Sent "2000" and "20000" (WRONG!)');
+console.log('   ✅ NEW: Sending "02", "03", "01" (CORRECT!)');
+console.log('   • Position 03 = Plastic dump');
+console.log('   • Position 02 = Metal dump');
+console.log('   • Position 01 = Home');
 console.log('========================================');
-console.log('📋 SEQUENCE:');
-console.log('   0. Gate Open');
-console.log('   1. Belt Forward → Weight (5s)');
-console.log('   2-3. Weight + AI Detection');
-console.log('   4. Motor 03 → Push to roller');
-console.log('   5. Stepper → Rotate 2000 steps');
-console.log('   6. Compactor → Crush');
-console.log('   7. Belt Reverse → Start');
-console.log('   8. Stepper → Initialize 20000 steps');
-console.log('   9. Gate Close');
+console.log('⚙️ UPDATED SETTINGS:');
+console.log('   • Belt forward: 8000ms (increased)');
+console.log('   • Stepper will now ROTATE!');
 console.log('========================================\n');
