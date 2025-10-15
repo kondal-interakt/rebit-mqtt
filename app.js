@@ -65,7 +65,7 @@ function delay(ms) {
 
 // ======= DRUM OPERATIONS (FROM MANUFACTURER) =======
 async function raiseDrum() {
-  console.log('⬆️ Raising drum...');
+  console.log('⬆️ [DRUM] Sending RAISE command (Motor 07, type 01)...');
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -74,12 +74,13 @@ async function raiseDrum() {
       deviceType: DEVICE_TYPE
     }
   });
-  await delay(2000);  // Wait for drum to rise
-  console.log('✅ Drum raised');
+  console.log('⏳ [DRUM] Waiting 2s for drum to rise...');
+  await delay(2000);
+  console.log('✅ [DRUM] Raise command complete');
 }
 
 async function lowerDrum() {
-  console.log('⬇️ Lowering drum...');
+  console.log('⬇️ [DRUM] Sending LOWER command (Motor 07, type 03)...');
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -88,12 +89,13 @@ async function lowerDrum() {
       deviceType: DEVICE_TYPE
     }
   });
-  await delay(2000);  // Wait for drum to lower
-  console.log('✅ Drum lowered');
+  console.log('⏳ [DRUM] Waiting 2s for drum to lower...');
+  await delay(2000);
+  console.log('✅ [DRUM] Lower command complete');
 }
 
 async function rotateDrum() {
-  console.log('🔄 Rotating drum to push bottle...');
+  console.log('🔄 [DRUM] Sending ROTATE command (Motor 03, type 01)...');
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -103,10 +105,10 @@ async function rotateDrum() {
     }
   });
   
-  // Rotate for enough time to push bottle into chute
-  await delay(5000);  // 5 seconds rotation
+  console.log('⏳ [DRUM] Rotating for 8 seconds to push bottle...');
+  await delay(8000);  // Increased to 8 seconds
   
-  // Stop drum rotation
+  console.log('🛑 [DRUM] Sending STOP rotation command (Motor 03, type 00)...');
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -116,28 +118,32 @@ async function rotateDrum() {
     }
   });
   
-  console.log('✅ Drum rotation complete');
+  console.log('✅ [DRUM] Rotation complete');
 }
 
 async function processBottleWithDrum() {
-  console.log('🥁 Processing bottle with drum mechanism...');
+  console.log('╔════════════════════════════════════════╗');
+  console.log('║   🥁 DRUM PROCESSING SEQUENCE START   ║');
+  console.log('╚════════════════════════════════════════╝');
   
-  // Step 1: Raise drum to lift bottle
+  console.log('\n[STEP 1/5] Raising drum to lift bottle...');
   await raiseDrum();
-  await delay(500);
+  await delay(1000);  // Extra settling time
   
-  // Step 2: Rotate drum to push bottle into chute
+  console.log('\n[STEP 2/5] Rotating drum to push bottle into chute...');
   await rotateDrum();
   
-  // Step 3: Wait for bottle to drop by gravity
-  console.log('⏳ Waiting for bottle to drop...');
-  await delay(3000);
+  console.log('\n[STEP 3/5] Waiting 5 seconds for bottle to fully drop...');
+  await delay(5000);  // Increased wait time
   
-  // Step 4: Lower drum back to start position
+  console.log('\n[STEP 4/5] Lowering drum back to start position...');
   await lowerDrum();
   await delay(500);
   
-  console.log('✅ Drum cycle complete');
+  console.log('\n[STEP 5/5] Drum cycle complete!');
+  console.log('╔════════════════════════════════════════╗');
+  console.log('║    ✅ DRUM PROCESSING COMPLETE        ║');
+  console.log('╚════════════════════════════════════════╝\n');
 }
 
 // ======= BELT CONTROL =======
@@ -287,8 +293,18 @@ async function moveToMiddlePosition() {
 }
 
 async function returnBeltToStart() {
-  console.log('🔄 Returning belt to start...');
+  console.log('🔄 [BELT] Returning to start (controlled speed)...');
   
+  // Check current position first
+  const currentPos = lastBeltStatus?.position || '00';
+  console.log(`   Current belt position: ${currentPos}`);
+  
+  if (currentPos === '01') {
+    console.log('✅ [BELT] Already at start');
+    return true;
+  }
+  
+  console.log('   Sending reverse command...');
   await executeCommand({ 
     action: 'customMotor', 
     params: { 
@@ -301,14 +317,18 @@ async function returnBeltToStart() {
   const startTime = Date.now();
   while (Date.now() - startTime < 10000) {
     await delay(300);
-    if (lastBeltStatus?.position === '01') {
+    const pos = lastBeltStatus?.position || '00';
+    console.log(`   Belt reversing... position: ${pos}`);
+    
+    if (pos === '01') {
       await executeCommand({ action: 'transferStop' });
-      console.log('✅ Belt at start');
+      console.log('✅ [BELT] Reached start position');
       return true;
     }
   }
   
   await executeCommand({ action: 'transferStop' });
+  console.log('⚠️ [BELT] Timeout, stopped anyway');
   return true;
 }
 
@@ -420,7 +440,12 @@ async function executeFullCycle() {
     // Process with DRUM mechanism
     await processBottleWithDrum();
     
+    // CRITICAL: Extra wait before belt moves
+    console.log('\n⏸️  PAUSING 3 seconds before belt return (ensure bottle dropped)...');
+    await delay(3000);
+    
     // Return belt
+    console.log('\n🔄 Now returning belt to start...');
     await returnBeltToStart();
     await delay(1000);
     
@@ -846,28 +871,28 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v4.0 - DRUM MECHANISM');
+console.log('🚀 RVM AGENT v4.0 - DRUM DEBUG VERSION');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🥁 CORRECT MECHANISM (From Manufacturer):');
+console.log('🥁 DRUM MECHANISM (From Manufacturer):');
 console.log('   Motor 07: Drum RAISE/LOWER');
 console.log('   Motor 03: Drum ROTATION');
 console.log('   Motor 02: Belt movement');
 console.log('   Device Type: 5');
 console.log('========================================');
-console.log('🔧 BELT FIX v2:');
-console.log('   - Graduated pulses: 200,250,300,350ms');
-console.log('   - If reaches END (03): Accept and process there');
-console.log('   - Middle (02) may not have working sensor');
-console.log('   - Drum can work at END position too');
+console.log('🔍 EXTENSIVE LOGGING ENABLED:');
+console.log('   - All drum commands logged');
+console.log('   - Belt position tracking');
+console.log('   - Extended wait times (8s rotate, 5s drop)');
+console.log('   - 3s pause before belt return');
 console.log('========================================');
-console.log('📋 Process:');
-console.log('   1. Belt → Middle OR End position');
-console.log('   2. Drum RISES (lifts bottle)');
-console.log('   3. Drum ROLLS (pushes into chute)');
-console.log('   4. Wait for drop (3s)');
-console.log('   5. Drum DESCENDS');
-console.log('   6. Belt returns to start');
+console.log('👀 WATCH FOR:');
+console.log('   1. Does drum actually LIFT? (motor 07)');
+console.log('   2. Does drum actually ROTATE? (motor 03)');
+console.log('   3. When does bottle come back?');
+console.log('      - Before drum moves?');
+console.log('      - During drum movement?');
+console.log('      - During belt return?');
 console.log('========================================');
 console.log('🤖 curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
 console.log('========================================\n');
