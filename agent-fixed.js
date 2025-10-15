@@ -1,6 +1,6 @@
-// RVM Agent v6.5 - FIXED SEQUENCE
-// Fixed: Bottle position sequence to prevent premature drum lift
-// Sequence: Gate Open → Belt Forward → Drum Lift & Center → Weight → Drum Down → Belt Forward to Bin → Belt Reverse → Gate Close
+// RVM Agent v6.6 - FIXED: Ignore false position sensor
+// Belt forward now runs for FULL TIME regardless of position sensor
+// Save as: agent-v6.6-fixed-push.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -25,14 +25,14 @@ const SYSTEM_CONFIG = {
     toCollectBin: { motorId: "03", type: "03" }
   },
   
-  // Timing configurations
+  // Timing configurations - INCREASED FOR COMPLETE PUSH
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
     timeouts: { 
       motor: 10000,
       beltToWeightPosition: 3000,    // Time to position bottle under drum
-      beltToBin: 8000,                // Time to push bottle to sorter/bin
-      beltReverse: 8000,              // Time to return belt to start
+      beltToBin: 12000,               // INCREASED: Full time to push bottle to bin (ignore sensor)
+      beltReverse: 10000,             // INCREASED: Full return time
       drumRise: 3000,
       drumCenter: 2000,
       drumDescend: 3000,
@@ -106,9 +106,10 @@ async function drumDescend() {
   console.log('✅ Drum descended');
 }
 
-// ======= BELT CONTROL =======
+// ======= BELT CONTROL - FIXED: IGNORE POSITION SENSOR =======
 async function beltForwardToWeightPosition() {
   console.log('🎯 Step 2: Belt moving bottle to weight position under drum...');
+  console.log(`   Running for ${SYSTEM_CONFIG.applet.timeouts.beltToWeightPosition}ms (FIXED TIME)`);
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -118,7 +119,7 @@ async function beltForwardToWeightPosition() {
     }
   });
   
-  // Wait for bottle to reach position under drum
+  // Run for FULL TIME - don't stop early
   await delay(SYSTEM_CONFIG.applet.timeouts.beltToWeightPosition);
   
   // Stop belt
@@ -127,12 +128,16 @@ async function beltForwardToWeightPosition() {
     params: SYSTEM_CONFIG.belt.stop
   });
   
-  console.log('✅ Bottle positioned under drum for weighing');
-  await delay(500); // Stabilization delay
+  console.log('✅ Bottle positioned under drum (3 second fixed movement)');
+  await delay(500);
 }
 
 async function beltForwardToBin() {
   console.log('🎯 Step 6: Belt pushing bottle FORWARD to sorter/bin...');
+  console.log(`   ⚠️ CRITICAL: Running for FULL ${SYSTEM_CONFIG.applet.timeouts.beltToBin}ms`);
+  console.log(`   🚫 IGNORING position sensor (it lies!)`);
+  
+  const startTime = Date.now();
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -142,24 +147,17 @@ async function beltForwardToBin() {
     }
   });
   
-  console.log(`➡️ Forward movement to bin (${SYSTEM_CONFIG.applet.timeouts.beltToBin}ms)...`);
+  // Log position every second but DON'T stop early
+  const checkInterval = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const pos = lastBeltStatus?.position || '??';
+    console.log(`   ⏱️ ${elapsed}ms elapsed | Position sensor: ${pos} | KEEP RUNNING...`);
+  }, 1000);
   
-  // Monitor position while moving
-  const startTime = Date.now();
-  let reachedTarget = false;
+  // Run for COMPLETE FIXED TIME regardless of position sensor
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltToBin);
   
-  while (Date.now() - startTime < SYSTEM_CONFIG.applet.timeouts.beltToBin) {
-    await delay(500);
-    
-    const pos = lastBeltStatus?.position || '00';
-    
-    // Stop when END position reached (position 03 = sorter/bin)
-    if (pos === '03') {
-      console.log('✅ REACHED SORTER - bottle at bin position');
-      reachedTarget = true;
-      break;
-    }
-  }
+  clearInterval(checkInterval);
   
   // Stop belt
   await executeCommand({ 
@@ -167,16 +165,15 @@ async function beltForwardToBin() {
     params: SYSTEM_CONFIG.belt.stop
   });
   
-  if (!reachedTarget) {
-    console.log('⚠️ Timeout reached - bottle should be at bin');
-  }
-  
-  console.log('✅ Bottle pushed to sorter/bin');
-  await delay(500); // Stabilization delay
+  const totalTime = Date.now() - startTime;
+  console.log(`✅ Belt forward complete: ${totalTime}ms total`);
+  console.log(`   📍 Final position sensor: ${lastBeltStatus?.position || '??'}`);
+  await delay(500);
 }
 
 async function beltReverseToStart() {
   console.log('🔄 Step 7: Belt returning to start position...');
+  console.log(`   Running for ${SYSTEM_CONFIG.applet.timeouts.beltReverse}ms (FIXED TIME)`);
   
   await executeCommand({ 
     action: 'customMotor', 
@@ -186,6 +183,7 @@ async function beltReverseToStart() {
     }
   });
   
+  // Run for FULL TIME
   await delay(SYSTEM_CONFIG.applet.timeouts.beltReverse);
   
   // Stop belt
@@ -271,27 +269,28 @@ async function resetSorterToHome() {
   console.log('✅ Sorter at home position');
 }
 
-// ======= FULL CYCLE - CORRECTED SEQUENCE =======
+// ======= FULL CYCLE - FIXED: IGNORE FALSE POSITION SENSOR =======
 async function executeFullCycle() {
   console.log('\n========================================');
-  console.log('🚀 STARTING CYCLE - CORRECT SEQUENCE');
+  console.log('🚀 STARTING CYCLE - FIXED SEQUENCE');
   console.log('========================================');
   console.log(`📍 Material: ${latestAIResult.materialType}`);
   console.log(`⚖️ Weight: ${latestWeight.weight}g`);
+  console.log('⚠️  BELT: Using FIXED TIME (ignoring position sensor)');
   console.log('========================================\n');
   
   try {
-    // STEP 1: Gate Open (if not already open)
+    // STEP 1: Gate Open
     console.log('▶️ Step 1: Opening gate...');
     await executeCommand({ action: 'openGate' });
     await delay(1000);
     console.log('✅ Gate opened\n');
     
-    // Position sorter BEFORE bottle moves (preparation)
+    // Position sorter before bottle moves
     await positionSorterForMaterial(latestAIResult.materialType);
     await delay(500);
     
-    // STEP 2: Belt Forward (to weight position under drum)
+    // STEP 2: Belt Forward (to weight position) - 3 seconds FIXED
     await beltForwardToWeightPosition();
     await delay(500);
     
@@ -300,7 +299,7 @@ async function executeFullCycle() {
     await drumRiseAndCenter();
     await delay(500);
     
-    // STEP 4: Weight Detection (already done, just log it)
+    // STEP 4: Weight Detection
     console.log('▶️ Step 4: Weight confirmed');
     console.log(`   ⚖️ Weight: ${latestWeight.weight}g\n`);
     await delay(500);
@@ -311,11 +310,11 @@ async function executeFullCycle() {
     await delay(500);
     console.log('✅ Drum lowered\n');
     
-    // STEP 6: Belt Forward to Bin (CRITICAL: This pushes bottle to sorter)
+    // STEP 6: Belt Forward to Bin - 12 seconds FIXED (CRITICAL FIX)
     await beltForwardToBin();
     await delay(1000);
     
-    // STEP 7: Belt Reverse to Start
+    // STEP 7: Belt Reverse to Start - 10 seconds FIXED
     await beltReverseToStart();
     await delay(500);
     
@@ -331,7 +330,7 @@ async function executeFullCycle() {
     // await compactorOperation();
     // await delay(500);
     
-    // Reset sorter to home
+    // Reset sorter
     await resetSorterToHome();
     await delay(500);
     
@@ -355,7 +354,7 @@ async function executeFullCycle() {
     console.error('========================================\n');
     cycleInProgress = false;
     
-    // Emergency stop all motors
+    // Emergency stop
     console.log('🛑 Emergency stop - resetting all motors...');
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.belt.stop });
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.drum.stop });
@@ -456,7 +455,7 @@ function connectWebSocket() {
             if (motor.motorType === '02') lastBeltStatus = motor;
           });
         } catch (err) {
-          console.error('❌ Parse error:', err.message);
+          // Ignore parse errors
         }
         return;
       }
@@ -648,24 +647,14 @@ process.on('SIGINT', () => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT v6.5 - FIXED SEQUENCE');
+console.log('🚀 RVM AGENT v6.6 - FIXED BELT PUSH');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('✅ CORRECTED OPERATION SEQUENCE:');
-console.log('   1. Gate Open');
-console.log('   2. Belt Forward (to weight position)');
-console.log('   3. Drum Lift & Center');
-console.log('   4. Weight Detection');
-console.log('   5. Drum Down');
-console.log('   6. Belt Forward to Bin');
-console.log('   7. Belt Reverse (to start)');
-console.log('   8. Gate Close');
-console.log('========================================');
-console.log('🔧 TIMING ADJUSTMENTS:');
-console.log('   - Belt to weight: 3000ms');
-console.log('   - Belt to bin: 8000ms');
-console.log('   - Belt reverse: 8000ms');
-console.log('   - Added stabilization delays');
+console.log('🔧 CRITICAL FIX:');
+console.log('   ❌ Position sensor is unreliable');
+console.log('   ✅ Using FIXED TIME movements');
+console.log('   ⏱️  Belt to bin: 12 seconds (increased)');
+console.log('   ⏱️  Belt reverse: 10 seconds (increased)');
 console.log('========================================');
 console.log('🤖 AUTO MODE:');
 console.log('   Enable: POST /api/rvm/RVM-3101/auto/enable');
