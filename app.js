@@ -174,32 +174,33 @@ async function ensureBeltAtStart() {
 }
 
 async function moveToMiddlePosition() {
-  console.log('🎯 Moving belt to middle (ultra-short pulses)...');
+  console.log('🎯 Moving belt to middle (graduated pulses)...');
   
   await ensureBeltAtStart();
   await delay(500);
   
-  let attempts = 0;
-  const maxAttempts = 10;
+  // Try progressively longer pulses: 200ms, 250ms, 300ms, 350ms
+  const pulseDurations = [200, 250, 300, 350, 320, 280];
   
-  while (attempts < maxAttempts) {
-    attempts++;
-    console.log(`Attempt ${attempts}: Current pos = ${lastBeltStatus?.position || '00'}`);
-    
+  for (let i = 0; i < pulseDurations.length; i++) {
+    const pulseDuration = pulseDurations[i];
     const currentPos = lastBeltStatus?.position || '00';
+    
+    console.log(`Attempt ${i + 1}: Current pos = ${currentPos}, trying ${pulseDuration}ms pulse`);
     
     // Already at middle?
     if (currentPos === '02') {
-      console.log('✅ Reached middle position');
+      console.log('✅ Already at middle position');
       return true;
     }
     
-    // Overshot to end?
+    // At end? Try to reverse back
     if (currentPos === '03') {
-      console.log('⚠️ At end - reversing to middle...');
+      console.log('⚠️ At end - trying short reverse to reach middle...');
       
-      // Use SHORT reverse pulses to get back to middle
-      for (let i = 0; i < 5; i++) {
+      // Try SHORT reverse pulses
+      const reversePulses = [200, 250, 300];
+      for (const revPulse of reversePulses) {
         await executeCommand({ 
           action: 'customMotor', 
           params: { 
@@ -208,32 +209,35 @@ async function moveToMiddlePosition() {
             deviceType: DEVICE_TYPE
           }
         });
-        await delay(300);  // Short 300ms reverse pulse
+        await delay(revPulse);
         await executeCommand({ action: 'transferStop' });
-        await delay(100);
+        await delay(150);
         
-        if (lastBeltStatus?.position === '02') {
+        const pos = lastBeltStatus?.position || '00';
+        console.log(`After ${revPulse}ms reverse: ${pos}`);
+        
+        if (pos === '02') {
           console.log('✅ Reached middle from reverse');
           return true;
         }
         
-        if (lastBeltStatus?.position === '01') {
-          console.log('Back at start, retry forward');
+        if (pos === '01') {
+          console.log('Back at start, will retry forward');
           break;
         }
       }
       
-      if (currentPos === '03') {
-        throw new Error('Cannot reverse from end position');
+      // If still at '03', accept it and continue
+      if (lastBeltStatus?.position === '03') {
+        console.log('⚠️ Cannot reach middle, using END position instead');
+        return true;  // Continue cycle at END position
       }
+      
       continue;
     }
     
-    // At start position - send VERY SHORT forward pulse
+    // At start - try forward pulse
     if (currentPos === '01') {
-      console.log(`Sending 400ms forward pulse...`);
-      
-      // Start forward
       await executeCommand({ 
         action: 'customMotor', 
         params: { 
@@ -243,34 +247,43 @@ async function moveToMiddlePosition() {
         }
       });
       
-      // Run for ONLY 400ms
-      await delay(400);
+      await delay(pulseDuration);
       
-      // STOP immediately
       await executeCommand({ action: 'transferStop' });
-      
-      // Check position VERY quickly
-      await delay(100);
+      await delay(150);
       
       const newPos = lastBeltStatus?.position || '00';
-      console.log(`After pulse: ${newPos}`);
+      console.log(`After ${pulseDuration}ms pulse: ${newPos}`);
       
       if (newPos === '02') {
-        console.log('✅ Reached middle');
+        console.log('✅ Reached middle position!');
         return true;
       }
       
       if (newPos === '03') {
-        console.log('Overshot in one pulse - trying reverse');
+        console.log('Overshot to end, trying reverse next');
         continue;
       }
       
-      // Still at '01', try again with slightly longer pulse
+      // Still at '01', try longer pulse next iteration
       continue;
     }
   }
   
-  throw new Error('Could not reach middle position after 10 attempts');
+  // If we couldn't reach middle after all attempts, check final position
+  const finalPos = lastBeltStatus?.position || '00';
+  
+  if (finalPos === '02') {
+    console.log('✅ Eventually reached middle');
+    return true;
+  }
+  
+  if (finalPos === '03') {
+    console.log('⚠️ At END position - will process there');
+    return true;  // Continue at end position (drum will handle it)
+  }
+  
+  throw new Error('Could not position belt reliably');
 }
 
 async function returnBeltToStart() {
@@ -842,19 +855,19 @@ console.log('   Motor 03: Drum ROTATION');
 console.log('   Motor 02: Belt movement');
 console.log('   Device Type: 5');
 console.log('========================================');
-console.log('🔧 BELT FIX:');
-console.log('   - Ultra-short 400ms forward pulses');
-console.log('   - 100ms position checks (10x faster!)');
-console.log('   - Up to 10 attempts to reach middle');
-console.log('   - 300ms reverse pulses if overshot');
+console.log('🔧 BELT FIX v2:');
+console.log('   - Graduated pulses: 200,250,300,350ms');
+console.log('   - If reaches END (03): Accept and process there');
+console.log('   - Middle (02) may not have working sensor');
+console.log('   - Drum can work at END position too');
 console.log('========================================');
 console.log('📋 Process:');
-console.log('   1. Belt → Middle (short pulses)');
+console.log('   1. Belt → Middle OR End position');
 console.log('   2. Drum RISES (lifts bottle)');
 console.log('   3. Drum ROLLS (pushes into chute)');
 console.log('   4. Wait for drop (3s)');
-console.log('   5. Drum DESCENDS (back to start)');
-console.log('   6. Belt returns');
+console.log('   5. Drum DESCENDS');
+console.log('   6. Belt returns to start');
 console.log('========================================');
 console.log('🤖 curl -X POST http://localhost:3008/api/rvm/RVM-3101/auto/enable');
 console.log('========================================\n');
