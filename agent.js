@@ -13,8 +13,7 @@ const WebSocket = require('ws');
 // ======= CONFIGURATION =======
 const CONFIG = {
   device: {
-    id: 'RVM-3101',
-    location: 'Secunderabad, Telangana, IN'
+    id: 'RVM-3101'
   },
   
   // Local Hardware API
@@ -279,7 +278,6 @@ async function executeAutoCycle() {
     const transactionData = {
       sessionId: state.sessionId,
       deviceId: CONFIG.device.id,
-      deviceLocation: CONFIG.device.location,
       materialType: state.aiResult.materialType,
       weight: state.weight.weight,
       rawWeight: state.weight.rawWeight,
@@ -469,7 +467,7 @@ function connectWebSocket() {
   
   state.ws.on('close', () => {
     console.log('⚠️ WebSocket closed, reconnecting...');
-    setTimeout(connectWebSocket, CONFIG.local.reconnectDelay || 5000);
+    setTimeout(connectWebSocket, 5000);
   });
   
   state.ws.on('error', (error) => {
@@ -582,7 +580,6 @@ process.on('SIGINT', () => {
 console.log('========================================');
 console.log('🚀 RVM AGENT v8.0 - PRODUCTION');
 console.log(`📱 Device: ${CONFIG.device.id}`);
-console.log(`📍 Location: ${CONFIG.device.location}`);
 console.log('========================================');
 console.log('📡 MQTT Topics:');
 console.log(`   Commands: ${CONFIG.mqtt.topics.commands}`);
