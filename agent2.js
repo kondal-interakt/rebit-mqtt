@@ -80,7 +80,7 @@ function delay(ms) {
 async function beltForwardToWeight() {
   console.log('▶️ Step 1: Belt moving bottle towards machine (to weight position)...');
   
-  // Send forward command
+  // Send forward command - type '02' moves to limit switch
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.belt.forward
@@ -89,14 +89,15 @@ async function beltForwardToWeight() {
   console.log(`   ⏳ Moving for ${SYSTEM_CONFIG.applet.timeouts.beltForward}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.beltForward);
   
-  // Ensure belt stops
+  // CRITICAL: Ensure belt fully stops
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.belt.stop
   });
   
-  // Additional settle time
-  await delay(SYSTEM_CONFIG.applet.timeouts.motorSettleDelay);
+  // Extra delay to ensure bottle settles at weight position
+  console.log('   ⏳ Allowing bottle to settle...');
+  await delay(1500);
   
   console.log('✅ Bottle at weight position\n');
 }
@@ -129,40 +130,42 @@ async function stepperRotateAndDump(materialType) {
   console.log('▶️ Step 5: Stepping motor rotating to dump bottle...');
   
   // Determine position code based on material type
-  let positionCode;
+  let typeCode;  // Changed from positionCode to be clearer
   
   switch (materialType) {
     case 'PLASTIC_BOTTLE': 
-      positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03'
-      console.log('   🔵 PLASTIC: Using position code 03');
+      typeCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03'
+      console.log('   🔵 PLASTIC: Using type code 03');
       break;
     case 'METAL_CAN': 
-      positionCode = SYSTEM_CONFIG.stepper.positions.metalCan; // '02'
-      console.log('   🟡 METAL: Using position code 02');
+      typeCode = SYSTEM_CONFIG.stepper.positions.metalCan; // '02'
+      console.log('   🟡 METAL: Using type code 02');
       break;
     case 'GLASS': 
-      positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03' (fallback)
-      console.log('   🟢 GLASS: Using position code 03 (fallback)');
+      typeCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03' (fallback)
+      console.log('   🟢 GLASS: Using type code 03 (fallback)');
       break;
     default:
-      positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03'
-      console.log('   ⚪ UNKNOWN: Using position code 03 (default)');
+      typeCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03'
+      console.log('   ⚪ UNKNOWN: Using type code 03 (default)');
   }
   
-  console.log(`   🔧 Sending stepper command: moduleId="${SYSTEM_CONFIG.stepper.moduleId}", type="${positionCode}"`);
+  console.log(`   🔧 Sending stepper command: moduleId="${SYSTEM_CONFIG.stepper.moduleId}", type="${typeCode}"`);
   
   await executeCommand({ 
     action: 'stepperMotor', 
     params: { 
-      type: positionCode  // FIXED: Using 'type' instead of 'position'
+      type: typeCode  // FIXED: Using 'type' as per documentation
     }
   });
   
   console.log(`   ⏳ Stepper rotating for ${SYSTEM_CONFIG.applet.timeouts.stepperRotate}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
   
+  // Additional delay to ensure bottle dumps completely
+  await delay(1000);
+  
   console.log('✅ Stepper rotated! Bottle should be dumped!\n');
-  await delay(SYSTEM_CONFIG.applet.timeouts.motorSettleDelay);
 }
 
 // ======= STEP 6: COMPACTOR =======
@@ -212,19 +215,22 @@ async function beltReverseToStart() {
 async function stepperResetToHome() {
   console.log('▶️ Step 8: Resetting stepper to home position...');
   
-  const homePosition = SYSTEM_CONFIG.stepper.positions.home; // '01'
+  const homeType = SYSTEM_CONFIG.stepper.positions.home; // '01'
   
-  console.log(`   🔧 Sending stepper reset: moduleId="${SYSTEM_CONFIG.stepper.moduleId}", type="${homePosition}"`);
+  console.log(`   🔧 Sending stepper reset: moduleId="${SYSTEM_CONFIG.stepper.moduleId}", type="${homeType}"`);
   
   await executeCommand({ 
     action: 'stepperMotor', 
     params: { 
-      type: homePosition  // FIXED: Using 'type' instead of 'position'
+      type: homeType  // Using 'type' as per API documentation
     }
   });
   
   console.log(`   ⏳ Resetting to home for ${SYSTEM_CONFIG.applet.timeouts.stepperRotate}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
+  
+  // Extra delay for complete reset
+  await delay(1000);
   
   console.log('✅ Stepper at home (flat basket)\n');
 }
@@ -284,7 +290,7 @@ async function executeCommand(commandData) {
     
     // Use stepper's specific module ID and correct parameter structure
     const stepperModuleId = SYSTEM_CONFIG.stepper.moduleId; // '0F'
-    const typeCode = params?.type || '01';  // FIXED: Using 'type' field
+    const typeCode = params?.type || '01';  // Use 'type' field from params
     
     console.log(`   📡 Stepper API: moduleId="${stepperModuleId}", type="${typeCode}", deviceType=${deviceType}`);
     
@@ -427,7 +433,7 @@ function connectWebSocket() {
       
       // Module ID response
       if (message.function === '01') {
-        currentModuleId = message.data;  // Fixed: use message.data not message.moduleId
+        currentModuleId = message.moduleId;  // Keep original - this is correct
         console.log(`✅ Module ID received: ${currentModuleId}`);
         if (pendingCommands.size > 0) {
           const [id, cmd] = Array.from(pendingCommands.entries())[0];
