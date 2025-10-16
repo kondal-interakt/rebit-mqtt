@@ -1,10 +1,11 @@
-// RVM Agent v7.5 - OPTIMIZED FAST CYCLE WITH IMPROVED DETECTION
+// RVM Agent v7.7 - OPTIMIZED FAST CYCLE WITH REALISTIC DETECTION
 // IMPROVEMENTS:
-// - Confidence threshold: 50% (up from 30%)
-// - Better material type detection with debug logging
+// - Realistic confidence thresholds for real-world use
+// - Metal cans: 22% | Plastic: 30% | Glass: 25%
+// - INCREASED crushing time: 10 seconds (was 4s) for complete crushing
+// - Better material detection with detailed logging
 // - Manual material override option
-// - Rejection of low-confidence detections
-// Save as: agent-v7.5-fast-cycle.js
+// Save as: agent-v7.7-fast-cycle.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -38,13 +39,15 @@ const SYSTEM_CONFIG = {
     }
   },
   
-  // DETECTION CONFIDENCE THRESHOLDS
+  // DETECTION CONFIDENCE THRESHOLDS - REALISTIC FOR REAL-WORLD USE
   detection: {
-    minConfidence: 0.50,  // 50% minimum confidence (increased from 30%)
+    minConfidence: 0.25,     // 25% absolute minimum - practical threshold
+    warningThreshold: 0.40,  // 40% - shows warning but accepts
+    goodThreshold: 0.60,     // 60% - considered good detection
     thresholdByMaterial: {
-      METAL_CAN: 0.40,      // Metal cans harder to detect - lower threshold
-      PLASTIC_BOTTLE: 0.50, // Common item - standard threshold
-      GLASS: 0.45           // Glass also harder - slightly lower
+      METAL_CAN: 0.22,       // 22% - metal cans are hardest to detect
+      PLASTIC_BOTTLE: 0.30,  // 30% - plastic bottles
+      GLASS: 0.25            // 25% - glass items
     }
   },
   
@@ -57,7 +60,7 @@ const SYSTEM_CONFIG = {
       beltReverse: 5000,         // Faster return
       stepperRotate: 4000,       // Faster tilt
       stepperReset: 6000,        // Faster reset
-      compactor: 4000,           // Faster crushing
+      compactor: 10000,          // INCREASED: 10 seconds for complete crushing (was 4s)
       positionSettle: 500,       // Reduced settle time
       gateOperation: 1000        // Faster gate operation
     }
@@ -87,7 +90,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= IMPROVED MATERIAL DETECTION WITH CONFIDENCE THRESHOLD =======
+// ======= IMPROVED MATERIAL DETECTION WITH REALISTIC THRESHOLDS =======
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
   const probability = aiData.probability || 0;
@@ -98,18 +101,10 @@ function determineMaterialType(aiData) {
   console.log('========================================');
   console.log(`📝 Raw className: "${aiData.className}"`);
   console.log(`📊 Confidence: ${confidencePercent}%`);
-  console.log('========================================');
   
-  // CRITICAL: Reject low confidence detections
-  if (probability < SYSTEM_CONFIG.detection.minConfidence) {
-    console.log(`❌ REJECTED: Confidence too low (${confidencePercent}% < ${SYSTEM_CONFIG.detection.minConfidence * 100}%)`);
-    console.log('💡 Action: Please remove item and try again');
-    console.log('   - Check camera focus and lighting');
-    console.log('   - Ensure item is clearly visible');
-    console.log('   - Position item in center of camera view');
-    console.log('========================================\n');
-    return 'UNKNOWN';
-  }
+  // Determine material type first
+  let detectedType = 'UNKNOWN';
+  let materialThreshold = SYSTEM_CONFIG.detection.minConfidence;
   
   // Metal can detection (check first - most specific)
   if (className.includes('易拉罐') || 
@@ -122,32 +117,68 @@ function determineMaterialType(aiData) {
       className.includes('金属') ||
       className.includes('铝罐') ||
       className.includes('铝')) {
-    console.log(`✅ METAL_CAN detected (${confidencePercent}%)`);
-    console.log('🟡 Will sort to: Position 02 (Metal bin)');
-    console.log('========================================\n');
-    return 'METAL_CAN';
+    detectedType = 'METAL_CAN';
+    materialThreshold = SYSTEM_CONFIG.detection.thresholdByMaterial.METAL_CAN;
   }
-  
   // Plastic bottle detection
-  if (className.includes('pet') || 
+  else if (className.includes('pet') || 
       className.includes('plastic') || 
       className.includes('bottle') ||
       className.includes('瓶') ||
       className.includes('塑料') ||
       className.includes('饮料')) {
-    console.log(`✅ PLASTIC_BOTTLE detected (${confidencePercent}%)`);
-    console.log('🔵 Will sort to: Position 03 (Plastic bin)');
-    console.log('========================================\n');
-    return 'PLASTIC_BOTTLE';
+    detectedType = 'PLASTIC_BOTTLE';
+    materialThreshold = SYSTEM_CONFIG.detection.thresholdByMaterial.PLASTIC_BOTTLE;
+  }
+  // Glass detection
+  else if (className.includes('玻璃') || 
+      className.includes('glass')) {
+    detectedType = 'GLASS';
+    materialThreshold = SYSTEM_CONFIG.detection.thresholdByMaterial.GLASS;
   }
   
-  // Glass detection
-  if (className.includes('玻璃') || 
-      className.includes('glass')) {
-    console.log(`✅ GLASS detected (${confidencePercent}%)`);
-    console.log('🟢 Will sort to: Position 03 (Glass bin)');
+  // Check if confidence meets material-specific threshold
+  if (detectedType !== 'UNKNOWN') {
+    const thresholdPercent = Math.round(materialThreshold * 100);
+    
+    if (probability < materialThreshold) {
+      console.log(`❌ REJECTED: ${detectedType} detected but confidence too low`);
+      console.log(`   Confidence: ${confidencePercent}% < ${thresholdPercent}% (threshold)`);
+      console.log('   💡 Action: Please reposition item and try again');
+      console.log('========================================\n');
+      return 'UNKNOWN';
+    }
+    
+    // Show confidence level indicator
+    let confidenceLevel = '⚠️ LOW';
+    let confidenceEmoji = '🟡';
+    if (probability >= SYSTEM_CONFIG.detection.goodThreshold) {
+      confidenceLevel = '✅ EXCELLENT';
+      confidenceEmoji = '🟢';
+    } else if (probability >= SYSTEM_CONFIG.detection.warningThreshold) {
+      confidenceLevel = '✓ ACCEPTABLE';
+      confidenceEmoji = '🟡';
+    } else {
+      confidenceLevel = '⚠️ LOW (but accepted)';
+      confidenceEmoji = '🟠';
+    }
+    
+    console.log(`${confidenceEmoji} ${confidenceLevel} - ${detectedType} detected (${confidencePercent}%)`);
+    console.log(`   Required: ${thresholdPercent}% | Got: ${confidencePercent}%`);
+    
+    switch (detectedType) {
+      case 'METAL_CAN':
+        console.log('🟡 Will sort to: Position 02 (Metal bin)');
+        break;
+      case 'PLASTIC_BOTTLE':
+        console.log('🔵 Will sort to: Position 03 (Plastic bin)');
+        break;
+      case 'GLASS':
+        console.log('🟢 Will sort to: Position 03 (Glass bin)');
+        break;
+    }
     console.log('========================================\n');
-    return 'GLASS';
+    return detectedType;
   }
   
   // No keyword match
@@ -252,7 +283,7 @@ async function stepperDumpBottle(materialType) {
   console.log('✅ Bottle dumped into crusher!\n');
 }
 
-// ======= STEP 5: COMPACTOR CRUSH =======
+// ======= STEP 5: COMPACTOR CRUSH (EXTENDED TIME) =======
 async function compactorCrush() {
   console.log('▶️ Step 5: Crushing bottle...');
   
@@ -262,7 +293,8 @@ async function compactorCrush() {
     params: SYSTEM_CONFIG.compactor.start
   });
   
-  console.log(`   ⏳ Crushing: ${SYSTEM_CONFIG.applet.timeouts.compactor}ms`);
+  console.log(`   ⏳ Crushing: ${SYSTEM_CONFIG.applet.timeouts.compactor}ms (10 seconds for complete crushing)`);
+  console.log('   💪 Extended crushing time ensures full bottle compression');
   await delay(SYSTEM_CONFIG.applet.timeouts.compactor);
   
   // Stop compactor
@@ -271,7 +303,7 @@ async function compactorCrush() {
     params: SYSTEM_CONFIG.compactor.stop
   });
   
-  console.log('✅ Crushing complete\n');
+  console.log('✅ Crushing complete - bottle fully compressed\n');
 }
 
 // ======= STEP 6: BELT RETURN =======
@@ -325,7 +357,7 @@ async function closeGate() {
 // ======= OPTIMIZED FAST CYCLE =======
 async function executeFastCycle() {
   console.log('\n========================================');
-  console.log('🚀 STARTING FAST CYCLE v7.5');
+  console.log('🚀 STARTING FAST CYCLE v7.7');
   console.log('========================================');
   console.log(`📍 Material: ${latestAIResult.materialType}`);
   console.log(`📊 Confidence: ${latestAIResult.matchRate}%`);
@@ -349,7 +381,7 @@ async function executeFastCycle() {
     // STEP 4: Stepper Dump
     await stepperDumpBottle(latestAIResult.materialType);
     
-    // STEP 5: Compactor
+    // STEP 5: Compactor (Extended crushing time)
     await compactorCrush();
     
     // STEP 6: Belt Return
@@ -363,7 +395,7 @@ async function executeFastCycle() {
     
     console.log('========================================');
     console.log('✅ FAST CYCLE COMPLETE!');
-    console.log('⏱️  Total time: ~25 seconds');
+    console.log('⏱️  Total time: ~31 seconds (with extended crushing)');
     console.log('========================================\n');
     
     // Publish success
@@ -543,7 +575,7 @@ function connectWebSocket() {
         
         console.log(`\n🔍 DEBUG - AI Raw Response:`);
         console.log(`   className: "${aiData.className}"`);
-        console.log(`   probability: ${probability}`);
+        console.log(`   probability: ${probability} (${Math.round(probability * 100)}%)`);
         console.log(`   taskId: ${aiData.taskId}`);
         
         latestAIResult = {
@@ -558,21 +590,22 @@ function connectWebSocket() {
         
         mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
         
-        // UPDATED: Require 50% confidence AND valid material type
-        if (autoCycleEnabled && 
-            latestAIResult.matchRate >= 50 &&  // Changed from 30 to 50
-            latestAIResult.materialType !== 'UNKNOWN') {
-          console.log('✅ High confidence detection - proceeding to weight...\n');
-          setTimeout(() => executeCommand({ action: 'getWeight' }), 500);
+        // UPDATED: Use material-specific thresholds
+        if (autoCycleEnabled && latestAIResult.materialType !== 'UNKNOWN') {
+          const materialType = latestAIResult.materialType;
+          const threshold = SYSTEM_CONFIG.detection.thresholdByMaterial[materialType] || SYSTEM_CONFIG.detection.minConfidence;
+          const thresholdPercent = Math.round(threshold * 100);
+          
+          if (latestAIResult.matchRate >= thresholdPercent) {
+            console.log(`✅ Confidence ${latestAIResult.matchRate}% meets ${materialType} threshold (${thresholdPercent}%)`);
+            console.log('   Proceeding to weight measurement...\n');
+            setTimeout(() => executeCommand({ action: 'getWeight' }), 500);
+          } else {
+            console.log(`⚠️ Confidence ${latestAIResult.matchRate}% below ${materialType} threshold (${thresholdPercent}%)`);
+            console.log('   Item rejected - please try again\n');
+          }
         } else if (latestAIResult.materialType === 'UNKNOWN') {
-          console.log('⚠️ Item not recognized or confidence too low');
-          console.log('   Action: Item will be rejected - gate will remain open\n');
-          // Optional: close and reopen gate to reject item
-          // setTimeout(async () => {
-          //   await executeCommand({ action: 'closeGate' });
-          //   await delay(2000);
-          //   await executeCommand({ action: 'openGate' });
-          // }, 1000);
+          console.log('⚠️ Item not recognized - please remove and try again\n');
         }
         return;
       }
@@ -730,7 +763,7 @@ process.on('SIGINT', () => {
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v7.5 - FAST CYCLE');
+console.log('🚀 RVM AGENT v7.7 - FAST CYCLE');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
 console.log('🔧 OPTIMIZED PROCESS:');
@@ -738,18 +771,22 @@ console.log('   1. Gate opens → Place bottle');
 console.log('   2. Belt moves to weight (type 02, 3s)');
 console.log('   3. Belt continues to stepper (type 03, 4s)');
 console.log('   4. Stepper tilts (4s) → Dump to crusher');
-console.log('   5. Compactor crushes (4s)');
+console.log('   5. Compactor crushes (10s) ⚡ EXTENDED TIME');
 console.log('   6. Belt returns (5s)');
 console.log('   7. Stepper resets (6s)');
 console.log('   8. Gate closes (1s)');
-console.log('   ⏱️  TOTAL: ~25 seconds');
+console.log('   ⏱️  TOTAL: ~31 seconds');
 console.log('========================================');
-console.log('🎯 DETECTION SETTINGS:');
-console.log(`   Minimum confidence: ${SYSTEM_CONFIG.detection.minConfidence * 100}%`);
-console.log('   Material thresholds:');
-console.log(`   - Metal cans: ${SYSTEM_CONFIG.detection.thresholdByMaterial.METAL_CAN * 100}%`);
-console.log(`   - Plastic: ${SYSTEM_CONFIG.detection.thresholdByMaterial.PLASTIC_BOTTLE * 100}%`);
-console.log(`   - Glass: ${SYSTEM_CONFIG.detection.thresholdByMaterial.GLASS * 100}%`);
+console.log('🎯 DETECTION SETTINGS (REAL-WORLD):');
+console.log(`   Metal cans: ${SYSTEM_CONFIG.detection.thresholdByMaterial.METAL_CAN * 100}% (hardest to detect)`);
+console.log(`   Plastic: ${SYSTEM_CONFIG.detection.thresholdByMaterial.PLASTIC_BOTTLE * 100}%`);
+console.log(`   Glass: ${SYSTEM_CONFIG.detection.thresholdByMaterial.GLASS * 100}%`);
+console.log(`   Warning level: ${SYSTEM_CONFIG.detection.warningThreshold * 100}%`);
+console.log(`   Good level: ${SYSTEM_CONFIG.detection.goodThreshold * 100}%`);
+console.log('========================================');
+console.log('💪 CRUSHING CONFIGURATION:');
+console.log(`   Crushing time: ${SYSTEM_CONFIG.applet.timeouts.compactor / 1000} seconds`);
+console.log('   Ensures complete bottle compression');
 console.log('========================================');
 console.log('📡 MANUAL OVERRIDE COMMAND:');
 console.log('   Topic: rvm/RVM-3101/commands');
