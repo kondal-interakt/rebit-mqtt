@@ -1,10 +1,10 @@
-// RVM Agent v7.4 - FIXED BELT MOVEMENT WITH PROPER KEEP-ALIVE
-// FIXES:
-// - Improved belt timing with retry logic
-// - Same API endpoints and command structure
-// - Enhanced error recovery
-// - Proper keep-alive to prevent automatic exit
-// Save as: agent-v7.4-complete-fixed.js
+// RVM Agent v7.4 - OPTIMIZED FAST CYCLE
+// OPTIMIZATIONS:
+// - Faster sequential process: gate open → place bottle → move to weight → immediate step motor → crush → gate close
+// - Reduced delays for faster operation
+// - Motor 02 type 02 for shorter belt movement
+// - Eliminated unnecessary steps
+// Save as: agent-v7.4-fast-cycle.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -13,52 +13,44 @@ const WebSocket = require('ws');
 
 // ======= SYSTEM CONFIGURATION =======
 const SYSTEM_CONFIG = {
-  // BELT COMMANDS - SAME AS BEFORE
+  // Belt commands (Motor 02) - Using type 02 for shorter movement
   belt: {
-    forward: { motorId: "02", type: "02" },  // Move to weight/AI position
-    reverse: { motorId: "02", type: "01" },  // Return to start
-    stop: { motorId: "02", type: "00" }      // Stop belt
+    toWeight: { motorId: "02", type: "02" },  // Short move to weight position
+    toStepper: { motorId: "02", type: "03" }, // Full move to stepper position
+    reverse: { motorId: "02", type: "01" },   // Return to start
+    stop: { motorId: "02", type: "00" }       // Stop belt
   },
   
-  // Pusher/Transfer command - SAME AS BEFORE
-  pusher: {
-    toRoller: { motorId: "03", type: "03" },  // Push to white basket/roller
-    reverse: { motorId: "03", type: "01" },   // Reverse (if needed)
-    stop: { motorId: "03", type: "00" }       // Stop pusher
-  },
-  
-  // Compactor commands - SAME AS BEFORE
+  // Compactor commands (Motor 04)
   compactor: {
     start: { motorId: "04", type: "01" },    // Start crushing
     stop: { motorId: "04", type: "00" }      // Stop crushing
   },
   
-  // STEPPER MOTOR - SAME AS BEFORE
+  // STEPPER MOTOR POSITION CODES (Module 09)
   stepper: {
-    moduleId: '0F',
+    moduleId: '09',
     positions: {
-      initialization: '00',   // Full initialization
-      home: '01',            // Return to origin (flat basket position)
-      metalCan: '02',        // Tilt position for metal can
-      plasticBottle: '03'    // Tilt position for plastic bottle
+      initialization: '00',
+      home: '01',
+      metalCan: '02',
+      plasticBottle: '03'
     }
   },
   
-  // IMPROVED TIMING WITH RETRY LOGIC
+  // OPTIMIZED TIMING CONFIGURATIONS
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
     timeouts: { 
-      beltForward: 15000,        // INCREASED to 15000ms for complete travel
-      pusherToRoller: 8000,      // INCREASED pusher time  
-      stepperRotate: 7000,       // INCREASED for proper basket rotation
-      stepperReset: 12000,       // LONGER reset time
-      beltReverse: 15000,        // Match forward timing
-      compactor: 8000,           // Compactor crushing time
-      positionSettle: 2000,      // Increased settle time
-      motorCooldown: 1500,       // Motor rest between operations
-      retryDelay: 3000           // Delay before retries
-    },
-    maxRetries: 3               // Maximum retry attempts
+      beltToWeight: 3000,        // SHORT movement to weight position
+      beltToStepper: 4000,       // Movement from weight to stepper
+      beltReverse: 5000,         // Faster return
+      stepperRotate: 4000,       // Faster tilt
+      stepperReset: 6000,        // Faster reset
+      compactor: 4000,           // Faster crushing
+      positionSettle: 500,       // Reduced settle time
+      gateOperation: 1000        // Faster gate operation
+    }
   }
 };
 
@@ -85,200 +77,89 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= IMPROVED BELT FORWARD WITH RETRY LOGIC =======
-async function beltForwardToWeight() {
-  console.log('▶️ Step 1: Belt moving bottle to weight/AI position...');
-  
-  let retryCount = 0;
-  
-  while (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
-    console.log(`   🔄 Attempt ${retryCount + 1}/${SYSTEM_CONFIG.applet.maxRetries}`);
-    console.log('   📏 Belt travel time: ' + SYSTEM_CONFIG.applet.timeouts.beltForward + 'ms');
-    
-    try {
-      // Start belt forward - SAME API CALL AS BEFORE
-      await executeCommand({ 
-        action: 'customMotor', 
-        params: SYSTEM_CONFIG.belt.forward
-      });
-      
-      // Wait for complete travel with progress indication
-      console.log('   🚚 Belt moving forward...');
-      for (let i = 0; i < 3; i++) {
-        await delay(SYSTEM_CONFIG.applet.timeouts.beltForward / 3);
-        console.log('   ... still moving ...');
-      }
-      
-      // Stop belt - SAME API CALL AS BEFORE
-      await executeCommand({ 
-        action: 'customMotor', 
-        params: SYSTEM_CONFIG.belt.stop
-      });
-      
-      // Allow position to settle
-      console.log('   ⏳ Allowing position to settle...');
-      await delay(SYSTEM_CONFIG.applet.timeouts.positionSettle);
-      
-      // Motor cooldown
-      await delay(SYSTEM_CONFIG.applet.timeouts.motorCooldown);
-      
-      console.log('✅ Bottle at weight/AI position\n');
-      return true; // Success
-      
-    } catch (err) {
-      retryCount++;
-      console.log(`   ❌ Belt forward attempt ${retryCount} failed: ${err.message}`);
-      
-      if (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
-        // Emergency stop before retry
-        await executeCommand({ 
-          action: 'customMotor', 
-          params: SYSTEM_CONFIG.belt.stop
-        });
-        
-        console.log(`   ⏳ Waiting ${SYSTEM_CONFIG.applet.timeouts.retryDelay}ms before retry...`);
-        await delay(SYSTEM_CONFIG.applet.timeouts.retryDelay);
-      }
-    }
-  }
-  
-  throw new Error(`Belt failed to reach weight position after ${SYSTEM_CONFIG.applet.maxRetries} attempts`);
+// ======= STEP 1: GATE OPEN =======
+async function openGateForBottle() {
+  console.log('▶️ Step 1: Opening gate for bottle placement...');
+  await executeCommand({ action: 'openGate' });
+  await delay(SYSTEM_CONFIG.applet.timeouts.gateOperation);
+  console.log('✅ Gate opened - Place bottle now\n');
 }
 
-// ======= IMPROVED PUSHER WITH RETRY LOGIC =======
-async function pushBottleToRoller() {
-  console.log('▶️ Step 4: Pushing bottle to white basket/roller...');
+// ======= STEP 2: MOVE TO WEIGHT POSITION =======
+async function moveToWeightPosition() {
+  console.log('▶️ Step 2: Moving bottle to weight position...');
+  console.log('   📏 Short belt movement: ' + SYSTEM_CONFIG.applet.timeouts.beltToWeight + 'ms');
   
-  let retryCount = 0;
+  // Start belt movement to weight position
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.toWeight
+  });
   
-  while (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
-    console.log(`   🔄 Attempt ${retryCount + 1}/${SYSTEM_CONFIG.applet.maxRetries}`);
-    console.log('   📏 Pusher operation time: ' + SYSTEM_CONFIG.applet.timeouts.pusherToRoller + 'ms');
-    
-    try {
-      // Start pusher forward - SAME API CALL AS BEFORE
-      await executeCommand({ 
-        action: 'customMotor', 
-        params: SYSTEM_CONFIG.pusher.toRoller
-      });
-      
-      // Wait for push completion
-      console.log('   🏗️ Pusher extending...');
-      await delay(SYSTEM_CONFIG.applet.timeouts.pusherToRoller);
-      
-      // Stop pusher - SAME API CALL AS BEFORE
-      await executeCommand({ 
-        action: 'customMotor', 
-        params: SYSTEM_CONFIG.pusher.stop
-      });
-      
-      // Allow bottle to settle in basket
-      console.log('   ⏳ Bottle settling in basket...');
-      await delay(SYSTEM_CONFIG.applet.timeouts.positionSettle);
-      
-      console.log('✅ Bottle on white basket ready for tilting!\n');
-      return true; // Success
-      
-    } catch (err) {
-      retryCount++;
-      console.log(`   ❌ Pusher attempt ${retryCount} failed: ${err.message}`);
-      
-      if (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
-        await executeCommand({ 
-          action: 'customMotor', 
-          params: SYSTEM_CONFIG.pusher.stop
-        });
-        
-        await delay(SYSTEM_CONFIG.applet.timeouts.retryDelay);
-      }
-    }
-  }
+  // Wait for short movement
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltToWeight);
   
-  throw new Error(`Pusher failed after ${SYSTEM_CONFIG.applet.maxRetries} attempts`);
+  // Stop belt
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.stop
+  });
+  
+  console.log('✅ Bottle at weight position\n');
 }
 
-// ======= IMPROVED BELT REVERSE WITH RETRY LOGIC =======
-async function beltReverseToStart() {
-  console.log('▶️ Step 7: Belt returning to start position...');
+// ======= STEP 3: MOVE TO STEPPER POSITION =======
+async function moveToStepperPosition() {
+  console.log('▶️ Step 3: Moving bottle to stepper position...');
+  console.log('   📏 Belt movement: ' + SYSTEM_CONFIG.applet.timeouts.beltToStepper + 'ms');
   
-  let retryCount = 0;
+  // Start belt movement to stepper position
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.toStepper
+  });
   
-  while (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
-    console.log(`   🔄 Attempt ${retryCount + 1}/${SYSTEM_CONFIG.applet.maxRetries}`);
-    console.log('   📏 Belt reverse time: ' + SYSTEM_CONFIG.applet.timeouts.beltReverse + 'ms');
-    
-    try {
-      // Start belt reverse - SAME API CALL AS BEFORE
-      await executeCommand({ 
-        action: 'customMotor', 
-        params: SYSTEM_CONFIG.belt.reverse
-      });
-      
-      // Wait for complete return
-      console.log('   🔄 Belt returning to start...');
-      for (let i = 0; i < 3; i++) {
-        await delay(SYSTEM_CONFIG.applet.timeouts.beltReverse / 3);
-        console.log('   ... still returning ...');
-      }
-      
-      // Stop belt - SAME API CALL AS BEFORE
-      await executeCommand({ 
-        action: 'customMotor', 
-        params: SYSTEM_CONFIG.belt.stop
-      });
-      
-      console.log('✅ Belt at start position\n');
-      await delay(500);
-      return true; // Success
-      
-    } catch (err) {
-      retryCount++;
-      console.log(`   ❌ Belt reverse attempt ${retryCount} failed: ${err.message}`);
-      
-      if (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
-        await executeCommand({ 
-          action: 'customMotor', 
-          params: SYSTEMSTEM_CONFIG.belt.stop
-        });
-        
-        await delay(SYSTEM_CONFIG.applet.timeouts.retryDelay);
-      }
-    }
-  }
+  // Wait for movement
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltToStepper);
   
-  throw new Error(`Belt failed to return to start after ${SYSTEM_CONFIG.applet.maxRetries} attempts`);
+  // Stop belt
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.stop
+  });
+  
+  // Allow position to settle
+  await delay(SYSTEM_CONFIG.applet.timeouts.positionSettle);
+  console.log('✅ Bottle at stepper position\n');
 }
 
-// ======= STEPPER MOTOR - NO CHANGES (SAME AS BEFORE) =======
-async function stepperRotateAndDump(materialType) {
-  console.log('▶️ Step 5: Tilting basket to dump bottle...');
+// ======= STEP 4: STEPPER MOTOR - DUMP BOTTLE =======
+async function stepperDumpBottle(materialType) {
+  console.log('▶️ Step 4: Tilting basket to dump bottle...');
   
-  // Select position based on material type - SAME LOGIC
-  let positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle;
+  // Select position based on material type
+  let positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // Default
   
   switch (materialType) {
     case 'PLASTIC_BOTTLE': 
       positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle;
-      console.log('   🔵 PLASTIC: Moving to position 03');
+      console.log('   🔵 PLASTIC: Position 03');
       break;
     case 'METAL_CAN': 
       positionCode = SYSTEM_CONFIG.stepper.positions.metalCan;
-      console.log('   🟡 METAL: Moving to position 02');
+      console.log('   🟡 METAL: Position 02');
       break;
     case 'GLASS': 
       positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle;
-      console.log('   🟢 GLASS: Moving to position 03');
+      console.log('   🟢 GLASS: Position 03');
       break;
     default:
-      console.log('   ⚪ UNKNOWN: Using default position 03');
+      console.log('   ⚪ UNKNOWN: Position 03');
   }
   
-  console.log(`   🔧 Sending stepper command:`);
-  console.log(`      - Module ID: ${SYSTEM_CONFIG.stepper.moduleId}`);
-  console.log(`      - Position: ${positionCode}`);
-  console.log(`      - Rotation time: ${SYSTEM_CONFIG.applet.timeouts.stepperRotate}ms`);
+  console.log(`   🔧 Stepper tilt: ${SYSTEM_CONFIG.applet.timeouts.stepperRotate}ms`);
   
-  // Send stepper command - SAME API CALL AS BEFORE
+  // Send stepper command
   await executeCommand({ 
     action: 'stepperMotor', 
     params: { position: positionCode }
@@ -287,118 +168,131 @@ async function stepperRotateAndDump(materialType) {
   // Wait for basket rotation
   await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
   
-  // Extra settling time for bottle to fall
-  console.log('   ⏳ Allowing bottle to fall into crusher...');
-  await delay(SYSTEM_CONFIG.applet.timeouts.positionSettle);
-  
-  console.log('✅ Basket tilted! Bottle dumped into crusher!\n');
+  console.log('✅ Bottle dumped into crusher!\n');
 }
 
-// ======= COMPACTOR - NO CHANGES (SAME AS BEFORE) =======
+// ======= STEP 5: COMPACTOR CRUSH =======
 async function compactorCrush() {
-  console.log('▶️ Step 6: Starting compactor...');
+  console.log('▶️ Step 5: Crushing bottle...');
   
-  // Start compactor - SAME API CALL AS BEFORE
+  // Start compactor
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.compactor.start
   });
   
-  console.log(`   ⏳ Crushing for ${SYSTEM_CONFIG.applet.timeouts.compactor}ms...`);
+  console.log(`   ⏳ Crushing: ${SYSTEM_CONFIG.applet.timeouts.compactor}ms`);
   await delay(SYSTEM_CONFIG.applet.timeouts.compactor);
   
-  // Stop compactor - SAME API CALL AS BEFORE
+  // Stop compactor
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.compactor.stop
   });
   
-  console.log('✅ Compaction complete\n');
-  await delay(500);
+  console.log('✅ Crushing complete\n');
 }
 
-// ======= STEPPER RESET - NO CHANGES (SAME AS BEFORE) =======
-async function stepperResetToHome() {
-  console.log('▶️ Step 8: Resetting basket to home (flat) position...');
+// ======= STEP 6: BELT RETURN =======
+async function beltReturnToStart() {
+  console.log('▶️ Step 6: Returning belt to start...');
+  console.log('   📏 Belt return: ' + SYSTEM_CONFIG.applet.timeouts.beltReverse + 'ms');
   
-  const homePosition = SYSTEM_CONFIG.stepper.positions.home;
-  
-  console.log(`   🔧 Sending stepper reset command:`);
-  console.log(`      - Module ID: ${SYSTEM_CONFIG.stepper.moduleId}`);
-  console.log(`      - Position: ${homePosition} (home)`);
-  console.log(`      - Reset time: ${SYSTEM_CONFIG.applet.timeouts.stepperReset}ms`);
-  
-  // Send reset command - SAME API CALL AS BEFORE
+  // Start belt reverse
   await executeCommand({ 
-    action: 'stepperMotor', 
-    params: { position: homePosition }
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.reverse
   });
   
-  // Wait for basket reset
-  await delay(SYSTEM_CONFIG.applet.timeouts.stepperReset);
+  // Wait for return
+  await delay(SYSTEM_CONFIG.applet.timeouts.beltReverse);
   
-  console.log('✅ Basket reset to home (flat) position\n');
-  await delay(500);
+  // Stop belt
+  await executeCommand({ 
+    action: 'customMotor', 
+    params: SYSTEM_CONFIG.belt.stop
+  });
+  
+  console.log('✅ Belt at start position\n');
 }
 
-// ======= FULL CYCLE WITH IMPROVED ERROR HANDLING =======
-async function executeFullCycle() {
+// ======= STEP 7: STEPPER RESET =======
+async function stepperReset() {
+  console.log('▶️ Step 7: Resetting stepper to home...');
+  console.log(`   🔧 Stepper reset: ${SYSTEM_CONFIG.applet.timeouts.stepperReset}ms`);
+  
+  // Send reset command
+  await executeCommand({ 
+    action: 'stepperMotor', 
+    params: { position: SYSTEM_CONFIG.stepper.positions.home }
+  });
+  
+  // Wait for reset
+  await delay(SYSTEM_CONFIG.applet.timeouts.stepperReset);
+  
+  console.log('✅ Stepper reset complete\n');
+}
+
+// ======= STEP 8: GATE CLOSE =======
+async function closeGate() {
+  console.log('▶️ Step 8: Closing gate...');
+  await executeCommand({ action: 'closeGate' });
+  await delay(SYSTEM_CONFIG.applet.timeouts.gateOperation);
+  console.log('✅ Gate closed\n');
+}
+
+// ======= OPTIMIZED FAST CYCLE =======
+async function executeFastCycle() {
   console.log('\n========================================');
-  console.log('🚀 STARTING CYCLE v7.4 - IMPROVED BELT MOVEMENT');
+  console.log('🚀 STARTING FAST CYCLE v7.4');
   console.log('========================================');
   console.log(`📍 Material: ${latestAIResult.materialType}`);
   console.log(`⚖️ Weight: ${latestWeight.weight}g`);
   console.log('========================================\n');
   
   try {
-    // STEP 0: Gate Open - SAME AS BEFORE
-    console.log('▶️ Step 0: Opening gate...');
-    await executeCommand({ action: 'openGate' });
-    await delay(2000);
-    console.log('✅ Gate opened\n');
+    // STEP 1: Gate Open
+    await openGateForBottle();
     
-    // STEP 1: Belt Forward with retry logic
-    await beltForwardToWeight();
+    // Wait for user to place bottle (simulated by object detection)
+    console.log('⏳ Waiting for bottle placement...');
+    await delay(2000); // Simulate user placing bottle
     
-    // STEP 2 & 3: Weight & AI (already done) - SAME AS BEFORE
-    console.log('✅ Step 2: Weight detected: ' + latestWeight.weight + 'g');
-    console.log('✅ Step 3: AI identified: ' + latestAIResult.materialType + '\n');
-    await delay(500);
+    // STEP 2: Move to Weight Position (Short movement)
+    await moveToWeightPosition();
     
-    // STEP 4: Push to Roller/Basket with retry logic
-    await pushBottleToRoller();
+    // STEP 3: Move to Stepper Position (Continue movement)
+    await moveToStepperPosition();
     
-    // STEP 5: Stepper Rotate - SAME AS BEFORE
-    await stepperRotateAndDump(latestAIResult.materialType);
+    // STEP 4: Stepper Dump
+    await stepperDumpBottle(latestAIResult.materialType);
     
-    // STEP 6: Compactor - SAME AS BEFORE
+    // STEP 5: Compactor
     await compactorCrush();
     
-    // STEP 7: Belt Reverse with retry logic
-    await beltReverseToStart();
+    // STEP 6: Belt Return
+    await beltReturnToStart();
     
-    // STEP 8: Stepper Reset - SAME AS BEFORE
-    await stepperResetToHome();
+    // STEP 7: Stepper Reset
+    await stepperReset();
     
-    // STEP 9: Gate Close - SAME AS BEFORE
-    console.log('▶️ Step 9: Closing gate...');
-    await executeCommand({ action: 'closeGate' });
-    await delay(2000);
-    console.log('✅ Gate closed\n');
+    // STEP 8: Gate Close
+    await closeGate();
     
     console.log('========================================');
-    console.log('✅ CYCLE COMPLETE SUCCESSFULLY!');
+    console.log('✅ FAST CYCLE COMPLETE!');
+    console.log('⏱️  Total time: ~25 seconds');
     console.log('========================================\n');
     
-    // Publish success - SAME AS BEFORE
+    // Publish success
     mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
       material: latestAIResult.materialType,
       weight: latestWeight.weight,
       timestamp: new Date().toISOString(),
-      version: '7.4-fixed-belt-retry'
+      cycleType: 'fast'
     }));
     
-    // Reset state - SAME AS BEFORE
+    // Reset state
     cycleInProgress = false;
     latestAIResult = null;
     latestWeight = null;
@@ -409,36 +303,23 @@ async function executeFullCycle() {
     console.error('========================================\n');
     cycleInProgress = false;
     
-    // Enhanced emergency stop
-    console.log('🛑 INITIATING ENHANCED EMERGENCY STOP...');
+    // Emergency stop
+    console.log('🛑 EMERGENCY STOP - Stopping all motors...');
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.belt.stop });
-    await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.pusher.stop });
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.compactor.stop });
     
-    // Try to reset stepper to home
-    try {
-      await stepperResetToHome();
-    } catch (stepperErr) {
-      console.log('⚠️ Stepper reset during emergency stop failed:', stepperErr.message);
-    }
-    
-    // Try to close gate
-    try {
-      await executeCommand({ action: 'closeGate' });
-    } catch (gateErr) {
-      console.log('⚠️ Gate close during emergency stop failed:', gateErr.message);
-    }
-    
-    console.log('🛑 Enhanced emergency stop complete\n');
+    // Reset systems
+    await stepperReset();
+    await closeGate();
+    console.log('🛑 Emergency stop complete\n');
   }
 }
 
-// ======= EXECUTE COMMAND - NO CHANGES (SAME API ENDPOINTS) =======
+// ======= EXECUTE COMMAND =======
 async function executeCommand(commandData) {
   const { action, params } = commandData;
   const deviceType = 1;
   
-  // Check for module ID (except for getModuleId)
   if (!currentModuleId && action !== 'getModuleId') {
     console.error('❌ No moduleId available');
     return;
@@ -446,7 +327,7 @@ async function executeCommand(commandData) {
   
   let apiUrl, apiPayload;
   
-  // Gate commands - SAME ENDPOINTS
+  // Gate commands
   if (action === 'openGate') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = { 
@@ -464,7 +345,7 @@ async function executeCommand(commandData) {
       deviceType 
     };
   } 
-  // Weight commands - SAME ENDPOINTS
+  // Weight commands
   else if (action === 'getWeight') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
     apiPayload = { 
@@ -478,27 +359,27 @@ async function executeCommand(commandData) {
       type: '00' 
     };
   } 
-  // Camera - SAME ENDPOINT
+  // Camera
   else if (action === 'takePhoto') {
     apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
     apiPayload = {};
   } 
-  // STEPPER MOTOR - SAME ENDPOINT
+  // Stepper Motor
   else if (action === 'stepperMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    
     const stepperModuleId = SYSTEM_CONFIG.stepper.moduleId;
     const positionCode = params?.position || '01';
     
-    console.log(`   📡 Stepper API call with moduleId="${stepperModuleId}", position="${positionCode}"`);
+    console.log(`   📡 Stepper: moduleId="${stepperModuleId}", position="${positionCode}"`);
     
     apiPayload = { 
       moduleId: stepperModuleId,
+      id: positionCode,
       type: positionCode,
       deviceType 
     };
   } 
-  // Regular motors (belt, pusher, compactor) - SAME ENDPOINT
+  // Regular motors
   else if (action === 'customMotor') {
     apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
     apiPayload = {
@@ -513,18 +394,18 @@ async function executeCommand(commandData) {
   }
   
   try {
-    console.log(`   📡 Calling ${apiUrl.split('/').pop()}: ${JSON.stringify(apiPayload)}`);
+    console.log(`   📡 ${apiUrl.split('/').pop()}: ${JSON.stringify(apiPayload)}`);
     
     const response = await axios.post(apiUrl, apiPayload, {
       timeout: 10000,
       headers: { 'Content-Type': 'application/json' }
     });
     
-    // Add delays for specific actions - SAME AS BEFORE
+    // Add minimal delays for specific actions
     if (action === 'takePhoto') {
-      await delay(2000);
+      await delay(1500);
     } else if (action === 'getWeight') {
-      await delay(3000);
+      await delay(2000);
     }
     
   } catch (err) {
@@ -564,7 +445,6 @@ function connectWebSocket() {
         currentModuleId = message.moduleId || message.data;
         console.log(`✅ Module ID received: ${currentModuleId}`);
         
-        // Process any pending commands
         if (pendingCommands.size > 0) {
           const [id, cmd] = Array.from(pendingCommands.entries())[0];
           executeCommand(cmd);
@@ -627,10 +507,10 @@ function connectWebSocket() {
         
         if (latestWeight.weight > 0) calibrationAttempts = 0;
         
-        // Start cycle if conditions met
-        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
+        // Start FAST cycle if conditions met
+        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 1 && !cycleInProgress) {
           cycleInProgress = true;
-          setTimeout(() => executeFullCycle(), 1000);
+          setTimeout(() => executeFastCycle(), 1000);
         }
         return;
       }
@@ -639,7 +519,7 @@ function connectWebSocket() {
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         if (code === 4 && autoCycleEnabled && !cycleInProgress) {
-          console.log('👤 Object detected by sensor');
+          console.log('👤 Object detected - Starting process...');
           setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
         }
         return;
@@ -686,14 +566,10 @@ const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
 mqttClient.on('connect', () => {
   console.log('✅ MQTT connected');
   
-  // Subscribe to control topics
   mqttClient.subscribe(`rvm/${DEVICE_ID}/commands`);
   mqttClient.subscribe(`rvm/${DEVICE_ID}/control/auto`);
   
-  // Start WebSocket connection
   connectWebSocket();
-  
-  // Request module ID after connection
   setTimeout(requestModuleId, 2000);
 });
 
@@ -701,7 +577,6 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
-    // Auto mode control
     if (topic.includes('/control/auto')) {
       autoCycleEnabled = payload.enabled === true;
       console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ENABLED' : 'DISABLED'}`);
@@ -714,9 +589,8 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
-    // Manual commands
     if (topic.includes('/commands')) {
-      console.log(`📩 Command received: ${payload.action}`);
+      console.log(`📩 Command: ${payload.action}`);
       
       if (!currentModuleId) {
         pendingCommands.set(Date.now().toString(), payload);
@@ -731,79 +605,28 @@ mqttClient.on('message', async (topic, message) => {
   }
 });
 
-// ======= KEEP ALIVE AND INITIALIZATION =======
-console.log('========================================');
-console.log('🚀 RVM AGENT v7.4 - FIXED BELT MOVEMENT');
-console.log(`📱 Device: ${DEVICE_ID}`);
-console.log('========================================');
-console.log('🔧 KEY IMPROVEMENTS:');
-console.log('   ✅ SAME API ENDPOINTS - no changes');
-console.log('   ✅ Retry logic for belt movements (3 attempts)');
-console.log('   ✅ Increased timing with safety margins');
-console.log('   ✅ Enhanced error recovery');
-console.log('   ✅ Progress indication during movements');
-console.log('========================================');
-console.log('📋 PROCESS FLOW WITH RETRY:');
-console.log('   0. Gate opens');
-console.log('   1. Belt forward (15s) → weight/AI position WITH RETRY');
-console.log('   2. Weight measurement');
-console.log('   3. AI identification');
-console.log('   4. Pusher (8s) → white basket WITH RETRY');
-console.log('   5. Stepper tilt → dump to crusher');
-console.log('   6. Compactor crushes');
-console.log('   7. Belt reverse (15s) → start WITH RETRY');
-console.log('   8. Stepper reset → flat position');
-console.log('   9. Gate closes');
-console.log('========================================\n');
-
-// Keep the process alive
-const keepAliveInterval = setInterval(() => {
-  // Just keep the process running
-}, 60000); // Check every minute
-
-// Global error handlers to prevent crashes
-process.on('uncaughtException', (error) => {
-  console.error('🛑 Uncaught Exception:', error.message);
-  console.log('🔧 Continuing operation...');
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('🛑 Unhandled Rejection at:', promise, 'reason:', reason);
-  console.log('🔧 Continuing operation...');
-});
-
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n🛑 Received shutdown signal...');
-  console.log('⏹️ Closing WebSocket...');
+  console.log('\n⏹️ Shutting down gracefully...');
   if (ws) ws.close();
-  
-  console.log('⏹️ Closing MQTT connection...');
   mqttClient.end();
-  
-  console.log('⏹️ Clearing intervals...');
-  clearInterval(keepAliveInterval);
-  
-  console.log('👋 RVM Agent shutdown complete');
   process.exit(0);
 });
 
-console.log('🚀 RVM Agent started successfully!');
-console.log('⏳ Waiting for connections and sensor triggers...');
-console.log('💡 Press Ctrl+C to stop the agent\n');
-
-// Health monitor
-setInterval(() => {
-  const status = {
-    timestamp: new Date().toISOString(),
-    moduleId: currentModuleId,
-    autoCycle: autoCycleEnabled,
-    cycleInProgress: cycleInProgress,
-    wsReady: ws && ws.readyState === WebSocket.OPEN,
-    mqttReady: mqttClient.connected
-  };
-  
-  if (Date.now() % 120000 < 1000) { // Log every 2 minutes
-    console.log('💓 Agent Status:', JSON.stringify(status));
-  }
-}, 30000); // Check every 30 seconds
+// ======= STARTUP =======
+console.log('========================================');
+console.log('🚀 RVM AGENT v7.4 - FAST CYCLE');
+console.log(`📱 Device: ${DEVICE_ID}`);
+console.log('========================================');
+console.log('🔧 OPTIMIZED PROCESS:');
+console.log('   1. Gate opens → Place bottle');
+console.log('   2. Belt moves to weight (type 02, 3s)');
+console.log('   3. Belt continues to stepper (type 03, 4s)');
+console.log('   4. Stepper tilts (4s) → Dump to crusher');
+console.log('   5. Compactor crushes (4s)');
+console.log('   6. Belt returns (5s)');
+console.log('   7. Stepper resets (6s)');
+console.log('   8. Gate closes (1s)');
+console.log('   ⏱️  TOTAL: ~25 seconds');
+console.log('========================================\n');
+console.log('⏳ Waiting for connections...\n');
