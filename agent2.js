@@ -43,9 +43,9 @@ const SYSTEM_CONFIG = {
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
     timeouts: { 
-      beltForward: 10000,        // INCREASED from 8000ms to ensure full movement
-      pusherToRoller: 5000,      
-      stepperRotate: 5000,       // INCREASED for stepper completion
+      beltForward: 20000,        // INCREASED from 8000ms to ensure full movement
+      pusherToRoller: 10000,      
+      stepperRotate: 10000,       // INCREASED for stepper completion
       beltReverse: 10000,        // Match forward timing
       compactor: 6000,
       motorSettleDelay: 1000     // NEW: Allow motors to settle
