@@ -1,7 +1,6 @@
-// RVM Agent v7.2 - FIXED STEPPER MOTOR POSITIONS
-// CRITICAL FIX: Using correct position codes (00-03) not step counts
-// Belt forward increased to 8000ms
-// Save as: agent-v7.2-fixed-stepper.js
+// RVM Agent v7.2 - FIXED BELT AND STEPPER ISSUES
+// Key fixes: Belt timing, stepper API parameters, sequence validation
+// Save as: agent-v7.2-fixed-belt-stepper.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -10,29 +9,28 @@ const WebSocket = require('ws');
 
 // ======= SYSTEM CONFIGURATION =======
 const SYSTEM_CONFIG = {
-  // Belt commands
+  // Belt commands - Motor 02
   belt: {
-    forward: { motorId: "02", type: "02" },
-    reverse: { motorId: "02", type: "01" },
-    stop: { motorId: "02", type: "00" }
+    forward: { motorId: "02", type: "02" },  // Forward to limit
+    reverse: { motorId: "02", type: "01" },  // Reverse back
+    stop: { motorId: "02", type: "00" }      // Stop
   },
   
-  // Pusher command (Motor 03)
+  // Pusher command - Motor 03 (Transfer to roller)
   pusher: {
-    toRoller: { motorId: "03", type: "03" },
+    toRoller: { motorId: "03", type: "03" },  // Push to end position
     stop: { motorId: "03", type: "00" }
   },
   
-  // Compactor commands
+  // Compactor commands - Motor 04
   compactor: {
     start: { motorId: "04", type: "01" },
     stop: { motorId: "04", type: "00" }
   },
   
-  // STEPPER MOTOR POSITION CODES (from documentation section 13)
-  // CRITICAL: Stepper motor has its own module ID: 0F (section 10)
+  // STEPPER MOTOR CONFIGURATION (from documentation)
   stepper: {
-    moduleId: '0F',  // Stepper motor module (NOT the main module!)
+    moduleId: '0F',  // Stepper motor module ID (NOT the main module!)
     positions: {
       initialization: '00',   // Full reset
       home: '01',            // Return to origin (flat basket)
@@ -45,11 +43,12 @@ const SYSTEM_CONFIG = {
   applet: {
     weightCoefficients: { 1: 988, 2: 942, 3: 942, 4: 942 },
     timeouts: { 
-      beltForward: 8000,         // INCREASED to 8000ms as requested
+      beltForward: 10000,        // INCREASED from 8000ms to ensure full movement
       pusherToRoller: 5000,      
-      stepperRotate: 4000,       // Time for stepper to complete rotation
-      beltReverse: 8000,         
-      compactor: 6000            
+      stepperRotate: 5000,       // INCREASED for stepper completion
+      beltReverse: 10000,        // Match forward timing
+      compactor: 6000,
+      motorSettleDelay: 1000     // NEW: Allow motors to settle
     }
   }
 };
@@ -81,21 +80,25 @@ function delay(ms) {
 async function beltForwardToWeight() {
   console.log('▶️ Step 1: Belt moving bottle towards machine (to weight position)...');
   
+  // Send forward command
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.belt.forward
   });
   
-  console.log(`   ⏳ Moving for ${SYSTEM_CONFIG.applet.timeouts.beltForward}ms (INCREASED to 8000ms)...`);
+  console.log(`   ⏳ Moving for ${SYSTEM_CONFIG.applet.timeouts.beltForward}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.beltForward);
   
+  // Ensure belt stops
   await executeCommand({ 
     action: 'customMotor', 
     params: SYSTEM_CONFIG.belt.stop
   });
   
+  // Additional settle time
+  await delay(SYSTEM_CONFIG.applet.timeouts.motorSettleDelay);
+  
   console.log('✅ Bottle at weight position\n');
-  await delay(500);
 }
 
 // ======= STEP 4: PUSHER - PUSH TO ROLLER =======
@@ -115,16 +118,18 @@ async function pushBottleToRoller() {
     params: SYSTEM_CONFIG.pusher.stop
   });
   
+  // Allow pusher to fully retract/settle
+  await delay(SYSTEM_CONFIG.applet.timeouts.motorSettleDelay);
+  
   console.log('✅ Bottle on white basket!\n');
-  await delay(1000);
 }
 
 // ======= STEP 5: STEPPER MOTOR - ROTATE TO DUMP (FIXED!) =======
 async function stepperRotateAndDump(materialType) {
   console.log('▶️ Step 5: Stepping motor rotating to dump bottle...');
   
-  // Use CORRECT position codes from documentation
-  let positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // Default '03'
+  // Determine position code based on material type
+  let positionCode;
   
   switch (materialType) {
     case 'PLASTIC_BOTTLE': 
@@ -137,22 +142,27 @@ async function stepperRotateAndDump(materialType) {
       break;
     case 'GLASS': 
       positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03' (fallback)
-      console.log('   🟢 GLASS: Using position code 03');
+      console.log('   🟢 GLASS: Using position code 03 (fallback)');
       break;
+    default:
+      positionCode = SYSTEM_CONFIG.stepper.positions.plasticBottle; // '03'
+      console.log('   ⚪ UNKNOWN: Using position code 03 (default)');
   }
   
-  console.log(`   🔧 Sending stepper command: position=${positionCode}`);
+  console.log(`   🔧 Sending stepper command: moduleId="${SYSTEM_CONFIG.stepper.moduleId}", type="${positionCode}"`);
   
   await executeCommand({ 
     action: 'stepperMotor', 
-    params: { position: positionCode }
+    params: { 
+      type: positionCode  // FIXED: Using 'type' instead of 'position'
+    }
   });
   
-  console.log('   ⏳ Stepper rotating (internal 2000 steps)...');
+  console.log(`   ⏳ Stepper rotating for ${SYSTEM_CONFIG.applet.timeouts.stepperRotate}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
   
   console.log('✅ Stepper rotated! Bottle should be dumped!\n');
-  await delay(1000);
+  await delay(SYSTEM_CONFIG.applet.timeouts.motorSettleDelay);
 }
 
 // ======= STEP 6: COMPACTOR =======
@@ -185,6 +195,7 @@ async function beltReverseToStart() {
     params: SYSTEM_CONFIG.belt.reverse
   });
   
+  console.log(`   ⏳ Reversing for ${SYSTEM_CONFIG.applet.timeouts.beltReverse}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.beltReverse);
   
   await executeCommand({ 
@@ -192,35 +203,142 @@ async function beltReverseToStart() {
     params: SYSTEM_CONFIG.belt.stop
   });
   
+  await delay(SYSTEM_CONFIG.applet.timeouts.motorSettleDelay);
+  
   console.log('✅ Belt at start\n');
-  await delay(500);
 }
 
-// ======= STEP 8: RESET STEPPER TO HOME (FIXED!) =======
+// ======= STEP 8: RESET STEPPER TO HOME =======
 async function stepperResetToHome() {
   console.log('▶️ Step 8: Resetting stepper to home position...');
   
-  // Use position code '01' for home (not '20000')
   const homePosition = SYSTEM_CONFIG.stepper.positions.home; // '01'
   
-  console.log(`   🔧 Sending stepper reset: position=${homePosition}`);
+  console.log(`   🔧 Sending stepper reset: moduleId="${SYSTEM_CONFIG.stepper.moduleId}", type="${homePosition}"`);
   
   await executeCommand({ 
     action: 'stepperMotor', 
-    params: { position: homePosition }
+    params: { 
+      type: homePosition  // FIXED: Using 'type' instead of 'position'
+    }
   });
   
-  console.log('   ⏳ Resetting to home (internal 20000 steps)...');
+  console.log(`   ⏳ Resetting to home for ${SYSTEM_CONFIG.applet.timeouts.stepperRotate}ms...`);
   await delay(SYSTEM_CONFIG.applet.timeouts.stepperRotate);
   
   console.log('✅ Stepper at home (flat basket)\n');
-  await delay(500);
+}
+
+// ======= EXECUTE COMMAND (FIXED) =======
+async function executeCommand(commandData) {
+  const { action, params } = commandData;
+  const deviceType = 1;
+  
+  if (!currentModuleId && action !== 'getModuleId') {
+    console.error('❌ No moduleId available');
+    return;
+  }
+  
+  let apiUrl, apiPayload;
+  
+  // Gate operations
+  if (action === 'openGate') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = { 
+      moduleId: currentModuleId, 
+      motorId: '01', 
+      type: '03', 
+      deviceType 
+    };
+  } else if (action === 'closeGate') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = { 
+      moduleId: currentModuleId, 
+      motorId: '01', 
+      type: '00', 
+      deviceType 
+    };
+  } 
+  // Weight operations
+  else if (action === 'getWeight') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
+    apiPayload = { 
+      moduleId: currentModuleId, 
+      type: '00' 
+    };
+  } else if (action === 'calibrateWeight') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/weightCalibration`;
+    apiPayload = { 
+      moduleId: currentModuleId, 
+      type: '00' 
+    };
+  } 
+  // Camera
+  else if (action === 'takePhoto') {
+    apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
+    apiPayload = {};
+  } 
+  // STEPPER MOTOR (FIXED)
+  else if (action === 'stepperMotor') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
+    
+    // Use stepper's specific module ID and correct parameter structure
+    const stepperModuleId = SYSTEM_CONFIG.stepper.moduleId; // '0F'
+    const typeCode = params?.type || '01';  // FIXED: Using 'type' field
+    
+    console.log(`   📡 Stepper API: moduleId="${stepperModuleId}", type="${typeCode}", deviceType=${deviceType}`);
+    
+    apiPayload = { 
+      moduleId: stepperModuleId,  // Use 0F for stepper motor
+      type: typeCode,             // Position code goes in 'type' field
+      deviceType 
+    };
+  } 
+  // Custom motor operations
+  else if (action === 'customMotor') {
+    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
+    apiPayload = {
+      moduleId: params?.moduleId || currentModuleId,
+      motorId: params?.motorId,
+      type: params?.type,
+      deviceType: params?.deviceType || deviceType
+    };
+  } else {
+    console.error('⚠️ Unknown action:', action);
+    return;
+  }
+  
+  try {
+    console.log(`   📡 API Call: ${apiUrl.split('/').pop()}`);
+    console.log(`   📦 Payload: ${JSON.stringify(apiPayload)}`);
+    
+    const response = await axios.post(apiUrl, apiPayload, {
+      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    console.log(`   ✅ Response: ${response.status}`);
+    
+    // Add delays for specific actions
+    if (action === 'takePhoto') {
+      await delay(2000);
+    } else if (action === 'getWeight') {
+      await delay(3000);
+    }
+    
+  } catch (err) {
+    console.error(`❌ ${action} failed:`, err.message);
+    if (err.response) {
+      console.error(`   Status: ${err.response.status}`);
+      console.error(`   Data: ${JSON.stringify(err.response.data)}`);
+    }
+  }
 }
 
 // ======= FULL CYCLE =======
 async function executeFullCycle() {
   console.log('\n========================================');
-  console.log('🚀 STARTING CYCLE - FIXED STEPPER');
+  console.log('🚀 STARTING CYCLE - FIXED SEQUENCE');
   console.log('========================================');
   console.log(`📍 Material: ${latestAIResult.materialType}`);
   console.log(`⚖️ Weight: ${latestWeight.weight}g`);
@@ -230,10 +348,10 @@ async function executeFullCycle() {
     // STEP 0: Gate Open
     console.log('▶️ Step 0: Opening gate...');
     await executeCommand({ action: 'openGate' });
-    await delay(1000);
+    await delay(2000);  // Give gate time to fully open
     console.log('✅ Gate opened\n');
     
-    // STEP 1: Belt Forward (8000ms)
+    // STEP 1: Belt Forward (with increased timing)
     await beltForwardToWeight();
     
     // STEP 2 & 3: Weight & AI (already done)
@@ -244,7 +362,7 @@ async function executeFullCycle() {
     // STEP 4: Push to Roller
     await pushBottleToRoller();
     
-    // STEP 5: Stepper Rotate (FIXED - using position codes!)
+    // STEP 5: Stepper Rotate (with fixed API parameters)
     await stepperRotateAndDump(latestAIResult.materialType);
     
     // STEP 6: Compactor
@@ -253,25 +371,27 @@ async function executeFullCycle() {
     // STEP 7: Belt Reverse
     await beltReverseToStart();
     
-    // STEP 8: Stepper Reset (FIXED - using position code!)
+    // STEP 8: Stepper Reset
     await stepperResetToHome();
     
     // STEP 9: Gate Close
     console.log('▶️ Step 9: Closing gate...');
     await executeCommand({ action: 'closeGate' });
-    await delay(1000);
+    await delay(2000);
     console.log('✅ Gate closed\n');
     
     console.log('========================================');
     console.log('✅ CYCLE COMPLETE!');
     console.log('========================================\n');
     
+    // Publish completion
     mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
       material: latestAIResult.materialType,
       weight: latestWeight.weight,
       timestamp: new Date().toISOString()
     }));
     
+    // Reset state
     cycleInProgress = false;
     latestAIResult = null;
     latestWeight = null;
@@ -282,7 +402,7 @@ async function executeFullCycle() {
     console.error('========================================\n');
     cycleInProgress = false;
     
-    // Emergency stop
+    // Emergency stop all motors
     console.log('🛑 Emergency stop...');
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.belt.stop });
     await executeCommand({ action: 'customMotor', params: SYSTEM_CONFIG.pusher.stop });
@@ -305,9 +425,10 @@ function connectWebSocket() {
     try {
       const message = JSON.parse(data);
       
+      // Module ID response
       if (message.function === '01') {
-        currentModuleId = message.moduleId;
-        console.log(`✅ Module ID: ${currentModuleId}`);
+        currentModuleId = message.data;  // Fixed: use message.data not message.moduleId
+        console.log(`✅ Module ID received: ${currentModuleId}`);
         if (pendingCommands.size > 0) {
           const [id, cmd] = Array.from(pendingCommands.entries())[0];
           executeCommand(cmd);
@@ -316,6 +437,7 @@ function connectWebSocket() {
         return;
       }
       
+      // AI Photo result
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
@@ -328,7 +450,7 @@ function connectWebSocket() {
           timestamp: new Date().toISOString()
         };
         
-        console.log(`🤖 AI: ${latestAIResult.matchRate}% - ${latestAIResult.materialType}`);
+        console.log(`🤖 AI Result: ${latestAIResult.matchRate}% - ${latestAIResult.materialType}`);
         
         mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
         
@@ -338,25 +460,27 @@ function connectWebSocket() {
         return;
       }
       
+      // Weight result
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         const weightCoefficient = SYSTEM_CONFIG.applet.weightCoefficients[1];
         const calibratedWeight = weightValue * (weightCoefficient / 1000);
         
         latestWeight = {
-          weight: calibratedWeight,
+          weight: Math.round(calibratedWeight * 100) / 100,  // Round to 2 decimals
           rawWeight: weightValue,
           coefficient: weightCoefficient,
           timestamp: new Date().toISOString()
         };
         
-        console.log(`⚖️ Weight: ${latestWeight.weight}g`);
+        console.log(`⚖️ Weight: ${latestWeight.weight}g (raw: ${weightValue})`);
         
         mqttClient.publish(`rvm/${DEVICE_ID}/weight_result`, JSON.stringify(latestWeight));
         
+        // Handle calibration if weight is invalid
         if (latestWeight.weight <= 0 && calibrationAttempts < 2) {
           calibrationAttempts++;
-          console.log(`⚠️ Calibrating (${calibrationAttempts}/2)...`);
+          console.log(`⚠️ Invalid weight, calibrating (${calibrationAttempts}/2)...`);
           setTimeout(async () => {
             await executeCommand({ action: 'calibrateWeight' });
             setTimeout(() => executeCommand({ action: 'getWeight' }), 1000);
@@ -366,6 +490,7 @@ function connectWebSocket() {
         
         if (latestWeight.weight > 0) calibrationAttempts = 0;
         
+        // Start cycle if conditions met
         if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
           cycleInProgress = true;
           setTimeout(() => executeFullCycle(), 1000);
@@ -373,26 +498,27 @@ function connectWebSocket() {
         return;
       }
       
+      // Device status (body sensor)
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         if (code === 4 && autoCycleEnabled && !cycleInProgress) {
-          console.log('👤 Object detected');
+          console.log('👤 Object detected by infrared sensor');
           setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
         }
         return;
       }
       
     } catch (err) {
-      console.error('❌ WS error:', err.message);
+      console.error('❌ WebSocket message error:', err.message);
     }
   });
   
   ws.on('close', () => {
-    console.log('⚠️ WS closed, reconnecting...');
+    console.log('⚠️ WebSocket closed, reconnecting in 5s...');
     setTimeout(connectWebSocket, 5000);
   });
   
-  ws.on('error', (err) => console.error('❌ WS error:', err.message));
+  ws.on('error', (err) => console.error('❌ WebSocket error:', err.message));
 }
 
 // ======= UTILITIES =======
@@ -409,94 +535,26 @@ function determineMaterialType(aiData) {
     return 'GLASS';
   }
   
+  // Default to plastic if confidence is high enough
   return aiData.probability >= 0.5 ? 'PLASTIC_BOTTLE' : 'UNKNOWN';
 }
 
-// ======= EXECUTE COMMAND =======
-async function executeCommand(commandData) {
-  const { action, params } = commandData;
-  const deviceType = 1;
-  
-  if (!currentModuleId && action !== 'getModuleId') {
-    console.error('❌ No moduleId');
-    return;
-  }
-  
-  let apiUrl, apiPayload;
-  
-  if (action === 'openGate') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '03', deviceType };
-  } else if (action === 'closeGate') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = { moduleId: currentModuleId, motorId: '01', type: '00', deviceType };
-  } else if (action === 'getWeight') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/getWeight`;
-    apiPayload = { moduleId: currentModuleId, type: '00' };
-  } else if (action === 'calibrateWeight') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/weightCalibration`;
-    apiPayload = { moduleId: currentModuleId, type: '00' };
-  } else if (action === 'takePhoto') {
-    apiUrl = `${LOCAL_API_BASE}/system/camera/process`;
-    apiPayload = {};
-  } else if (action === 'stepperMotor') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/stepMotorSelect`;
-    
-    // CRITICAL FIX: Stepper motor has its own module ID: 0F (not currentModuleId!)
-    const stepperModuleId = SYSTEM_CONFIG.stepper.moduleId; // '0F'
-    const positionCode = params?.position || '01';
-    
-    console.log(`   🔧 API Call: stepMotorSelect with moduleId="${stepperModuleId}", position="${positionCode}"`);
-    
-    apiPayload = { 
-      moduleId: stepperModuleId,  // FIXED: Use 0F for stepper motor
-      type: positionCode,
-      deviceType 
-    };
-  } else if (action === 'customMotor') {
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = {
-      moduleId: params?.moduleId || currentModuleId,
-      motorId: params?.motorId,
-      type: params?.type,
-      deviceType: params?.deviceType || deviceType
-    };
-  } else {
-    console.error('⚠️ Unknown action:', action);
-    return;
-  }
-  
-  try {
-    console.log(`   📡 Sending to ${apiUrl.split('/').pop()}: ${JSON.stringify(apiPayload)}`);
-    
-    await axios.post(apiUrl, apiPayload, {
-      timeout: 10000,
-      headers: { 'Content-Type': 'application/json' }
-    });
-    
-    if (action === 'takePhoto') {
-      await delay(2000);
-    } else if (action === 'getWeight') {
-      await delay(3000);
-    }
-    
-  } catch (err) {
-    console.error(`❌ ${action} failed:`, err.message);
-  }
-}
-
+// Module ID request
 async function requestModuleId() {
   try {
+    console.log('📡 Requesting module ID...');
     await axios.post(`${LOCAL_API_BASE}/system/serial/getModuleId`, {}, {
       timeout: 5000,
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (err) {
     console.error('❌ Module ID request failed:', err.message);
+    // Retry after 2 seconds
+    setTimeout(requestModuleId, 2000);
   }
 }
 
-// ======= MQTT =======
+// ======= MQTT CONNECTION =======
 const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
   username: MQTT_USERNAME,
   password: MQTT_PASSWORD,
@@ -507,11 +565,14 @@ const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
 mqttClient.on('connect', () => {
   console.log('✅ MQTT connected');
   
+  // Subscribe to control topics
   mqttClient.subscribe(`rvm/${DEVICE_ID}/commands`);
   mqttClient.subscribe(`rvm/${DEVICE_ID}/control/auto`);
   
+  // Connect WebSocket
   connectWebSocket();
   
+  // Request module ID after connection
   setTimeout(requestModuleId, 2000);
 });
 
@@ -519,9 +580,10 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
+    // Auto mode control
     if (topic.includes('/control/auto')) {
       autoCycleEnabled = payload.enabled === true;
-      console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ON' : 'OFF'}`);
+      console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ENABLED' : 'DISABLED'}`);
       
       if (autoCycleEnabled && currentModuleId) {
         await executeCommand({ action: 'openGate' });
@@ -531,8 +593,9 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
+    // Manual commands
     if (topic.includes('/commands')) {
-      console.log(`📩 Command: ${payload.action}`);
+      console.log(`📩 Command received: ${payload.action}`);
       
       if (!currentModuleId) {
         pendingCommands.set(Date.now().toString(), payload);
@@ -543,30 +606,33 @@ mqttClient.on('message', async (topic, message) => {
     }
     
   } catch (err) {
-    console.error('❌ MQTT error:', err.message);
+    console.error('❌ MQTT message error:', err.message);
   }
 });
 
+// Clean shutdown
 process.on('SIGINT', () => {
-  console.log('\n⏹️ Shutting down...');
+  console.log('\n⏹️ Shutting down gracefully...');
   if (ws) ws.close();
   mqttClient.end();
   process.exit(0);
 });
 
+// Startup banner
 console.log('========================================');
-console.log('🚀 RVM AGENT v7.2 - FIXED STEPPER!');
+console.log('🚀 RVM AGENT v7.2 - FIXED BELT & STEPPER');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🔧 CRITICAL FIX:');
-console.log('   ❌ OLD: moduleId="09" (WRONG!)');
-console.log('   ✅ NEW: moduleId="0F" (Stepper Module!)');
-console.log('   • Stepper has its own module: 0F');
-console.log('   • Position 03 = Plastic dump');
-console.log('   • Position 02 = Metal dump');
-console.log('   • Position 01 = Home');
+console.log('🔧 KEY FIXES:');
+console.log('   ✅ Belt timing: 10000ms (increased)');
+console.log('   ✅ Stepper API: Using "type" field');
+console.log('   ✅ Module ID: Dynamic (from WS)');
+console.log('   ✅ Stepper Module: 0F (separate)');
+console.log('   ✅ Motor settle delays added');
 console.log('========================================');
-console.log('⚙️ UPDATED SETTINGS:');
-console.log('   • Belt forward: 8000ms (increased)');
-console.log('   • Stepper Module ID: 0F');
-console.log('========================================\n')
+console.log('📋 STEPPER POSITIONS:');
+console.log('   • 00 = Initialize');
+console.log('   • 01 = Home (flat)');
+console.log('   • 02 = Metal can dump');
+console.log('   • 03 = Plastic bottle dump');
+console.log('========================================\n');
