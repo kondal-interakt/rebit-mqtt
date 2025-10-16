@@ -1,340 +1,389 @@
+// motor-test.js - Test script to identify which motor controls the basket
+// Run with: node motor-test.js
+
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
-const WebSocket = require('ws');
+const readline = require('readline');
 
-// ======= CONFIGURATION =======
-const DEVICE_ID = 'RVM-3101';
-const LOCAL_API_BASE = 'http://localhost:8081';
-const WS_URL = 'ws://localhost:8081/websocket/qazwsx1234';
+// ========== CONFIGURATION ==========
+const MQTT_CONFIG = {
+  broker: 'mqtts://mqtt.ceewen.xyz:8883',
+  username: 'mqttuser',
+  password: 'mqttUser@2025',
+  caFile: 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle',
+  deviceId: 'RVM-3101'
+};
 
-// MQTT Configuration
-const MQTT_BROKER_URL = 'mqtts://mqtt.ceewen.xyz:8883';
-const MQTT_USERNAME = 'mqttuser';
-const MQTT_PASSWORD = 'mqttUser@2025';
-const MQTT_CA_FILE = 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle';
+const API_CONFIG = {
+  baseUrl: 'http://localhost:8081',
+  moduleId: null  // Will be fetched dynamically
+};
 
-// Store moduleId from getModuleId response
-let currentModuleId = null;
-let pendingCommands = new Map();
+// ========== UTILITY FUNCTIONS ==========
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
 
-// ======= WEBSOCKET CONNECTION =======
-let ws = null;
-
-function connectWebSocket() {
-  console.log(`🔌 Attempting to connect to WebSocket: ${WS_URL}`);
-  
-  ws = new WebSocket(WS_URL);
-  
-  ws.on('open', () => {
-    console.log('✅ WebSocket connected to RVM');
-  });
-  
-  ws.on('message', (data) => {
-    try {
-      console.log('\n📩 Raw WebSocket message:', data.toString());
-      
-      const message = JSON.parse(data);
-      console.log('📩 Parsed WebSocket message:', JSON.stringify(message, null, 2));
-      
-      // Skip connection success message
-      if (message.msg === '连接成功' || message.msg === 'connection successful') {
-        console.log('✅ WebSocket connection confirmed');
-        return;
-      }
-      
-      // Handle getModuleId response (function: "01")
-      if (message.function === '01') {
-        currentModuleId = message.moduleId;
-        console.log(`✅ Module ID received: ${currentModuleId}`);
-        console.log(`📋 Device Serial: ${message.data}`);
-        console.log(`🔌 COM Port: ${message.comId}`);
-        
-        // Check if there's a pending command waiting for moduleId
-        if (pendingCommands.size > 0) {
-          const [commandId, commandData] = Array.from(pendingCommands.entries())[0];
-          console.log(`🔄 Executing pending command: ${commandData.action}`);
-          executePendingCommand(commandData);
-          pendingCommands.delete(commandId);
-        }
-        return;
-      }
-      
-      // Publish WebSocket events to MQTT
-      const eventTopic = `rvm/${DEVICE_ID}/events`;
-      const payload = {
-        deviceId: DEVICE_ID,
-        function: message.function || 'unknown',
-        data: message.data || message,
-        rawMessage: message,
-        timestamp: new Date().toISOString()
-      };
-      
-      mqttClient.publish(eventTopic, JSON.stringify(payload), (err) => {
-        if (err) {
-          console.error('❌ Failed to publish event:', err.message);
-        } else {
-          console.log('📤 Event published to MQTT');
-        }
-      });
-      
-      // Log specific events
-      if (message.function === 'aiPhoto') {
-        console.log('🤖 AI Detection Result:', message.data);
-      } else if (message.function === 'deviceStatus') {
-        console.log('📦 Bin Status:', message.data);
-      } else if (message.function === '03') {
-        console.log('⚠️ Device Error:', message.data);
-      } else if (message.function === '06') {
-        console.log('⚖️ Weight Event:', message.data);
-      } else if (message.function === 'qrcode') {
-        console.log('🔍 QR Code Scanned:', message.data);
-      } else {
-        console.log('📨 Other Event:', message.function || 'unknown');
-      }
-      
-    } catch (err) {
-      console.error('❌ WebSocket parse error:', err.message);
-      console.error('Raw data:', data.toString());
-    }
-  });
-  
-  ws.on('close', () => {
-    console.log('⚠️ WebSocket closed, reconnecting in 5s...');
-    setTimeout(connectWebSocket, 5000);
-  });
-  
-  ws.on('error', (err) => {
-    console.error('❌ WebSocket error:', err.message);
+function askQuestion(question) {
+  return new Promise(resolve => {
+    rl.question(question, answer => {
+      resolve(answer.trim());
+    });
   });
 }
 
-// ======= GET MODULE ID =======
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ========== MQTT TEST FUNCTIONS ==========
+async function testViaMQTT() {
+  console.log('\n📡 TESTING VIA MQTT...\n');
+  
+  const client = mqtt.connect(MQTT_CONFIG.broker, {
+    username: MQTT_CONFIG.username,
+    password: MQTT_CONFIG.password,
+    ca: fs.readFileSync(MQTT_CONFIG.caFile),
+    rejectUnauthorized: false
+  });
+
+  return new Promise((resolve, reject) => {
+    client.on('connect', async () => {
+      console.log('✅ Connected to MQTT broker');
+      const topic = `rvm/${MQTT_CONFIG.deviceId}/commands`;
+      
+      console.log('\n========== AUTOMATED MOTOR TESTS ==========\n');
+      
+      // Test 1: Find basket motor automatically
+      console.log('🔍 Running automatic basket motor detection...');
+      console.log('⚠️  WATCH THE MACHINE CAREFULLY!\n');
+      
+      client.publish(topic, JSON.stringify({ action: 'findBasketMotor' }));
+      await delay(15000); // Wait for all motors to be tested
+      
+      // Test 2: Individual motor tests
+      console.log('\n🔧 Now testing individual motors...\n');
+      
+      // Test Motor 05
+      console.log('Testing Motor 05...');
+      client.publish(topic, JSON.stringify({
+        action: 'testMotor',
+        motorId: '05',
+        testAction: 'forward'
+      }));
+      await delay(5000);
+      
+      // Test Motor 06
+      console.log('Testing Motor 06...');
+      client.publish(topic, JSON.stringify({
+        action: 'testMotor',
+        motorId: '06',
+        testAction: 'forward'
+      }));
+      await delay(5000);
+      
+      // Test Motor 07 (if exists)
+      console.log('Testing Motor 07 (if exists)...');
+      client.publish(topic, JSON.stringify({
+        action: 'testMotor',
+        motorId: '07',
+        testAction: 'forward'
+      }));
+      await delay(5000);
+      
+      console.log('\n✅ MQTT tests complete!');
+      client.end();
+      resolve();
+    });
+
+    client.on('error', err => {
+      console.error('❌ MQTT error:', err.message);
+      reject(err);
+    });
+  });
+}
+
+// ========== DIRECT API TEST FUNCTIONS ==========
 async function getModuleId() {
   try {
-    console.log('🔍 Getting Module ID...');
-    const result = await axios.post(`${LOCAL_API_BASE}/system/serial/getModuleId`, {}, {
-      timeout: 5000,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    console.log('📥 getModuleId HTTP Response:', JSON.stringify(result.data, null, 2));
-    console.log('⏳ Waiting for WebSocket response with function: "01"...');
-    
-    return result.data;
+    console.log('📡 Getting module ID...');
+    const response = await axios.post(`${API_CONFIG.baseUrl}/system/serial/getModuleId`, {});
+    // Module ID will be received via WebSocket, so we'll use a default for now
+    API_CONFIG.moduleId = '09'; // Default, update if different
+    console.log(`✅ Using module ID: ${API_CONFIG.moduleId}`);
+    return API_CONFIG.moduleId;
   } catch (err) {
-    console.error('❌ Failed to get module ID:', err.message);
-    throw err;
+    console.log('⚠️  Could not fetch module ID, using default: 09');
+    API_CONFIG.moduleId = '09';
+    return API_CONFIG.moduleId;
   }
 }
 
-// ======= EXECUTE PENDING COMMAND =======
-async function executePendingCommand(commandData) {
-  const { action, originalCommand } = commandData;
+async function testMotorDirect(motorId, action = '03', duration = 3000) {
+  console.log(`\n🔧 Testing Motor ${motorId}...`);
+  console.log(`   Action: ${action} (00=stop, 01=reverse, 02=middle, 03=forward)`);
+  console.log(`   Duration: ${duration}ms`);
+  console.log(`   ⚠️  WATCH: Does the BASKET move?\n`);
   
-  let apiUrl;
-  let apiPayload;
-  
-  if (!currentModuleId) {
-    console.error('❌ No moduleId available!');
-    return;
-  }
-  
-  if (action === 'openGate') {
-    console.log('🚪 Processing: Open Gate');
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = {
-      moduleId: currentModuleId,  // Use dynamic moduleId from getModuleId
-      motorId: '01',
-      type: '03',
+  try {
+    // Start motor
+    await axios.post(`${API_CONFIG.baseUrl}/system/serial/motorSelect`, {
+      moduleId: API_CONFIG.moduleId,
+      motorId: motorId,
+      type: action,
       deviceType: 1
-    };
+    });
     
-  } else if (action === 'closeGate') {
-    console.log('🚪 Processing: Close Gate');
-    apiUrl = `${LOCAL_API_BASE}/system/serial/motorSelect`;
-    apiPayload = {
-      moduleId: currentModuleId,  // Use dynamic moduleId from getModuleId
-      motorId: '01',
+    console.log(`   ✅ Motor ${motorId} started`);
+    
+    // Wait
+    await delay(duration);
+    
+    // Stop motor
+    await axios.post(`${API_CONFIG.baseUrl}/system/serial/motorSelect`, {
+      moduleId: API_CONFIG.moduleId,
+      motorId: motorId,
       type: '00',
       deviceType: 1
-    };
-  }
-  
-  console.log(`🔗 Calling RVM API: ${apiUrl}`);
-  console.log(`📦 Request payload (with moduleId ${currentModuleId}):`, JSON.stringify(apiPayload, null, 2));
-  
-  try {
-    const result = await axios.post(apiUrl, apiPayload, {
-      timeout: 10000,
-      headers: {
-        'Content-Type': 'application/json'
-      }
     });
     
-    console.log(`✅ RVM API Response Status: ${result.status}`);
-    console.log(`📥 RVM API Response:`, JSON.stringify(result.data, null, 2));
+    console.log(`   ✅ Motor ${motorId} stopped`);
     
-    if (result.status === 200 && result.data.code === 200) {
-      console.log(`✅ ${action} executed successfully`);
-      console.log(`📡 Hardware command: ${result.data.data.cmd}`);
-      
-      // Send success response
-      const responseTopic = `rvm/${DEVICE_ID}/responses`;
-      const responsePayload = {
-        command: action,
-        success: true,
-        result: {
-          status: result.status,
-          code: result.data.code,
-          message: result.data.msg,
-          hardwareCommand: result.data.data.cmd,
-          moduleId: currentModuleId,
-          details: result.data.data.message
-        },
-        timestamp: new Date().toISOString()
-      };
-      
-      mqttClient.publish(responseTopic, JSON.stringify(responsePayload), (err) => {
-        if (err) {
-          console.error('❌ Failed to publish response:', err.message);
-        } else {
-          console.log('📤 Success response published to MQTT');
-        }
-      });
-    }
-    
-  } catch (apiError) {
-    console.error('\n❌ RVM API Call Failed!');
-    console.error(`   Error: ${apiError.message}`);
-    
-    const responseTopic = `rvm/${DEVICE_ID}/responses`;
-    mqttClient.publish(responseTopic, JSON.stringify({
-      command: action,
-      success: false,
-      error: apiError.message,
-      timestamp: new Date().toISOString()
-    }));
+  } catch (err) {
+    console.error(`   ❌ Error testing motor ${motorId}:`, err.message);
   }
 }
 
-// ======= MQTT CLIENT =======
-const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
-  username: MQTT_USERNAME,
-  password: MQTT_PASSWORD,
-  ca: fs.readFileSync(MQTT_CA_FILE),
-  rejectUnauthorized: false
-});
-
-mqttClient.on('connect', () => {
-  console.log('✅ Connected to MQTT Broker');
-  
-  // Subscribe to commands
-  const commandTopic = `rvm/${DEVICE_ID}/commands`;
-  mqttClient.subscribe(commandTopic, (err) => {
-    if (!err) {
-      console.log(`📡 Subscribed to: ${commandTopic}`);
-    } else {
-      console.error('❌ Subscribe error:', err.message);
-    }
-  });
-  
-  // Start WebSocket connection
-  console.log('\n🔌 Starting WebSocket connection...');
-  connectWebSocket();
-  
-  // Get moduleId on startup after WebSocket connects
-  setTimeout(async () => {
-    try {
-      await getModuleId();
-    } catch (err) {
-      console.error('⚠️ Failed to get moduleId on startup');
-    }
-  }, 2000); // Wait 2 seconds for WebSocket to connect
-});
-
-// ======= HANDLE MQTT COMMANDS =======
-mqttClient.on('message', async (topic, message) => {
-  console.log('\n========================================');
-  console.log(`📩 MQTT Command received on topic: ${topic}`);
-  console.log(`📨 Raw message: ${message.toString()}`);
+async function testStepperDirect(position = '03', duration = 4000) {
+  console.log(`\n🔧 Testing Stepper Motor (Module 0F)...`);
+  console.log(`   Position: ${position}`);
+  console.log(`   Duration: ${duration}ms`);
+  console.log(`   ⚠️  WATCH: Does the BASKET or YELLOW DRUM move?\n`);
   
   try {
-    const command = JSON.parse(message.toString());
-    console.log(`📋 Parsed command:`, JSON.stringify(command, null, 2));
+    // Move stepper
+    await axios.post(`${API_CONFIG.baseUrl}/system/serial/stepMotorSelect`, {
+      moduleId: '0F',  // Stepper always uses 0F
+      type: position,
+      deviceType: 1
+    });
     
-    if (command.action !== 'openGate' && command.action !== 'closeGate') {
-      console.log('⚠️ Unknown command:', command.action);
-      const responseTopic = `rvm/${DEVICE_ID}/responses`;
-      mqttClient.publish(responseTopic, JSON.stringify({
-        command: command.action,
-        success: false,
-        error: 'Unknown command',
-        timestamp: new Date().toISOString()
-      }));
-      console.log('========================================\n');
-      return;
-    }
+    console.log(`   ✅ Stepper moved to position ${position}`);
     
-    // Check if we have moduleId
-    if (!currentModuleId) {
-      console.log('⚠️ No moduleId yet, fetching it first...');
-      
-      // Store command as pending
-      const commandId = Date.now().toString();
-      pendingCommands.set(commandId, {
-        action: command.action,
-        originalCommand: command
-      });
-      
-      // Get moduleId (will trigger command execution via WebSocket response)
-      await getModuleId();
-      
-    } else {
-      // We have moduleId, execute immediately
-      console.log(`✅ Using cached moduleId: ${currentModuleId}`);
-      await executePendingCommand({
-        action: command.action,
-        originalCommand: command
-      });
-    }
+    // Wait
+    await delay(duration);
+    
+    // Return to home
+    await axios.post(`${API_CONFIG.baseUrl}/system/serial/stepMotorSelect`, {
+      moduleId: '0F',
+      type: '01',  // Home position
+      deviceType: 1
+    });
+    
+    console.log(`   ✅ Stepper returned to home`);
     
   } catch (err) {
-    console.error('❌ Command parsing error:', err.message);
+    console.error(`   ❌ Error testing stepper:`, err.message);
+  }
+}
+
+async function testViaAPI() {
+  console.log('\n🔌 TESTING VIA DIRECT API...\n');
+  
+  // Get module ID first
+  await getModuleId();
+  await delay(1000);
+  
+  console.log('\n========== MOTOR IDENTIFICATION TESTS ==========');
+  console.log('📋 We will test each motor for 3 seconds');
+  console.log('⚠️  WATCH CAREFULLY which motor moves the WHITE BASKET\n');
+  
+  await askQuestion('Press ENTER to start testing...');
+  
+  // Test known motors first to understand the system
+  console.log('\n--- Testing Known Motors ---');
+  
+  // Test Gate (Motor 01)
+  console.log('\n1️⃣ Testing Motor 01 (Gate)...');
+  await testMotorDirect('01', '03', 2000);
+  await delay(2000);
+  
+  // Test Belt (Motor 02)
+  console.log('\n2️⃣ Testing Motor 02 (Belt)...');
+  await testMotorDirect('02', '02', 2000);
+  await delay(2000);
+  
+  // Test Pusher (Motor 03)
+  console.log('\n3️⃣ Testing Motor 03 (Pusher)...');
+  await testMotorDirect('03', '03', 2000);
+  await delay(2000);
+  
+  // Test Compactor (Motor 04)
+  console.log('\n4️⃣ Testing Motor 04 (Compactor)...');
+  await testMotorDirect('04', '01', 2000);
+  await delay(2000);
+  
+  console.log('\n--- Testing Unknown Motors (Possible Basket) ---');
+  
+  // Test Motor 05
+  console.log('\n5️⃣ Testing Motor 05 (Unknown - Possible Basket)...');
+  await testMotorDirect('05', '03', 3000);
+  const motor05 = await askQuestion('Did Motor 05 move the BASKET? (y/n): ');
+  await delay(1000);
+  
+  // Test Motor 06
+  console.log('\n6️⃣ Testing Motor 06 (Unknown - Possible Basket)...');
+  await testMotorDirect('06', '03', 3000);
+  const motor06 = await askQuestion('Did Motor 06 move the BASKET? (y/n): ');
+  await delay(1000);
+  
+  // Test Motor 07
+  console.log('\n7️⃣ Testing Motor 07 (If exists)...');
+  await testMotorDirect('07', '03', 3000);
+  const motor07 = await askQuestion('Did Motor 07 move the BASKET? (y/n): ');
+  await delay(1000);
+  
+  // Test Stepper
+  console.log('\n8️⃣ Testing Stepper Motor (Module 0F)...');
+  await testStepperDirect('03', 4000);
+  const stepperResult = await askQuestion('Did the Stepper move the BASKET or YELLOW DRUM? (basket/drum/none): ');
+  
+  // Results
+  console.log('\n========== TEST RESULTS ==========\n');
+  
+  if (motor05.toLowerCase() === 'y') {
+    console.log('✅ Motor 05 controls the BASKET');
+    console.log('📝 Update your code: sorter.motorId = "05"');
+  }
+  if (motor06.toLowerCase() === 'y') {
+    console.log('✅ Motor 06 controls the BASKET');
+    console.log('📝 Update your code: sorter.motorId = "06"');
+  }
+  if (motor07.toLowerCase() === 'y') {
+    console.log('✅ Motor 07 controls the BASKET');
+    console.log('📝 Update your code: sorter.motorId = "07"');
   }
   
+  if (stepperResult.toLowerCase().includes('basket')) {
+    console.log('✅ Stepper (0F) controls the BASKET');
+    console.log('📝 Keep using stepper commands for basket');
+  } else if (stepperResult.toLowerCase().includes('drum')) {
+    console.log('⚠️  Stepper (0F) controls the YELLOW DRUM (not the basket)');
+  }
+  
+  if (motor05.toLowerCase() !== 'y' && motor06.toLowerCase() !== 'y' && 
+      motor07.toLowerCase() !== 'y' && !stepperResult.toLowerCase().includes('basket')) {
+    console.log('❌ No motor identified for the basket!');
+    console.log('   Try testing motors 08, 09, 0A manually');
+  }
+}
+
+// ========== INTERACTIVE MANUAL TEST ==========
+async function interactiveTest() {
+  console.log('\n🎮 INTERACTIVE MOTOR CONTROL\n');
+  
+  await getModuleId();
+  
+  while (true) {
+    console.log('\n--- Motor Control Menu ---');
+    console.log('1. Test motor (forward)');
+    console.log('2. Test motor (reverse)');
+    console.log('3. Test motor (middle position)');
+    console.log('4. Stop motor');
+    console.log('5. Test stepper positions');
+    console.log('6. Custom command');
+    console.log('0. Exit');
+    
+    const choice = await askQuestion('\nEnter choice: ');
+    
+    if (choice === '0') break;
+    
+    switch(choice) {
+      case '1':
+        const motor1 = await askQuestion('Enter motor ID (01-0A): ');
+        await testMotorDirect(motor1, '03', 3000);
+        break;
+        
+      case '2':
+        const motor2 = await askQuestion('Enter motor ID (01-0A): ');
+        await testMotorDirect(motor2, '01', 3000);
+        break;
+        
+      case '3':
+        const motor3 = await askQuestion('Enter motor ID (01-0A): ');
+        await testMotorDirect(motor3, '02', 3000);
+        break;
+        
+      case '4':
+        const motor4 = await askQuestion('Enter motor ID (01-0A): ');
+        await testMotorDirect(motor4, '00', 0);
+        break;
+        
+      case '5':
+        const pos = await askQuestion('Enter position (00-03): ');
+        await testStepperDirect(pos, 4000);
+        break;
+        
+      case '6':
+        const motorId = await askQuestion('Enter motor ID: ');
+        const type = await askQuestion('Enter type (00-03): ');
+        const duration = await askQuestion('Enter duration (ms): ');
+        await testMotorDirect(motorId, type, parseInt(duration));
+        break;
+    }
+  }
+}
+
+// ========== MAIN PROGRAM ==========
+async function main() {
+  console.log('========================================');
+  console.log('🔧 RVM MOTOR TESTING UTILITY');
+  console.log('========================================');
+  console.log('This script will help identify which motor');
+  console.log('controls the white basket mechanism\n');
+  
+  console.log('Select test method:');
+  console.log('1. MQTT Test (requires agent running)');
+  console.log('2. Direct API Test');
+  console.log('3. Interactive Manual Control');
+  console.log('4. Run All Tests');
+  
+  const choice = await askQuestion('\nEnter choice (1-4): ');
+  
+  try {
+    switch(choice) {
+      case '1':
+        await testViaMQTT();
+        break;
+      case '2':
+        await testViaAPI();
+        break;
+      case '3':
+        await interactiveTest();
+        break;
+      case '4':
+        await testViaMQTT();
+        await testViaAPI();
+        break;
+      default:
+        console.log('Invalid choice');
+    }
+  } catch (err) {
+    console.error('\n❌ Error:', err.message);
+  }
+  
+  console.log('\n========================================');
+  console.log('📝 NEXT STEPS:');
+  console.log('1. Identify which motor controls the basket');
+  console.log('2. Update your agent code with correct motorId');
+  console.log('3. Test the complete cycle');
   console.log('========================================\n');
-});
-
-mqttClient.on('error', (err) => {
-  console.error('❌ MQTT error:', err.message);
-});
-
-mqttClient.on('reconnect', () => {
-  console.log('🔄 Reconnecting to MQTT...');
-});
-
-process.on('SIGINT', () => {
-  console.log('\n⏹️ Shutting down...');
-  if (ws) ws.close();
-  mqttClient.end();
+  
+  rl.close();
   process.exit(0);
-});
+}
 
-console.log('========================================');
-console.log('🚀 RVM Agent Started');
-console.log('========================================');
-console.log(`📱 Device ID: ${DEVICE_ID}`);
-console.log(`🔌 RVM API & WebSocket: localhost:8081`);
-console.log(`   - HTTP API: ${LOCAL_API_BASE}`);
-console.log(`   - WebSocket: ${WS_URL}`);
-console.log(`🔗 MQTT Broker: ${MQTT_BROKER_URL}`);
-console.log('========================================');
-console.log('\n📖 Operation Flow:');
-console.log('   1. Call getModuleId API');
-console.log('   2. Receive moduleId via WebSocket (function: "01")');
-console.log('   3. Use moduleId in motor commands');
-console.log('   4. WebSocket monitors for events');
-console.log('========================================\n');
+// Run the program
+main().catch(console.error);
