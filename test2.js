@@ -1,9 +1,10 @@
-// RVM Agent v7.4 - FIXED MATERIAL DETECTION
-// FIXES:
-// - Improved AI material classification logic
-// - Better debugging for AI results
-// - Manual material override via MQTT
-// Save as: agent-v7.4-fixed-material.js
+// RVM Agent v7.5 - OPTIMIZED FAST CYCLE WITH IMPROVED DETECTION
+// IMPROVEMENTS:
+// - Confidence threshold: 50% (up from 30%)
+// - Better material type detection with debug logging
+// - Manual material override option
+// - Rejection of low-confidence detections
+// Save as: agent-v7.5-fast-cycle.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -34,6 +35,16 @@ const SYSTEM_CONFIG = {
       home: '01',
       metalCan: '02',
       plasticBottle: '03'
+    }
+  },
+  
+  // DETECTION CONFIDENCE THRESHOLDS
+  detection: {
+    minConfidence: 0.50,  // 50% minimum confidence (increased from 30%)
+    thresholdByMaterial: {
+      METAL_CAN: 0.40,      // Metal cans harder to detect - lower threshold
+      PLASTIC_BOTTLE: 0.50, // Common item - standard threshold
+      GLASS: 0.45           // Glass also harder - slightly lower
     }
   },
   
@@ -76,52 +87,75 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ======= IMPROVED MATERIAL DETECTION =======
+// ======= IMPROVED MATERIAL DETECTION WITH CONFIDENCE THRESHOLD =======
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
   const probability = aiData.probability || 0;
+  const confidencePercent = Math.round(probability * 100);
   
-  console.log(`🔍 RAW AI DETECTION: "${className}" (${Math.round(probability * 100)}%)`);
-
-  // METAL DETECTION - Most specific keywords first
-  if (className.includes('易拉罐') || className.includes('铝罐') || 
-      className.includes('金属罐') || className.includes('metal') || 
-      className.includes('can') || className.includes('aluminum') ||
-      className.includes('罐')) {
-    console.log('🟡 CONFIRMED: METAL CAN');
-    return 'METAL_CAN';
-  }
+  console.log('\n========================================');
+  console.log('🔍 AI DETECTION ANALYSIS');
+  console.log('========================================');
+  console.log(`📝 Raw className: "${aiData.className}"`);
+  console.log(`📊 Confidence: ${confidencePercent}%`);
+  console.log('========================================');
   
-  // PLASTIC DETECTION
-  if (className.includes('pet') || className.includes('塑料') || 
-      className.includes('plastic') || className.includes('瓶') ||
-      className.includes('pet瓶') || className.includes('饮料瓶') ||
-      className.includes('塑料瓶')) {
-    console.log('🔵 CONFIRMED: PLASTIC BOTTLE');
-    return 'PLASTIC_BOTTLE';
-  }
-  
-  // GLASS DETECTION
-  if (className.includes('玻璃') || className.includes('glass') || 
-      className.includes('酒瓶') || className.includes('beer') || 
-      className.includes('wine') || className.includes('玻璃瓶')) {
-    console.log('🟢 CONFIRMED: GLASS');
-    return 'GLASS';
-  }
-
-  // FALLBACK: If no specific keywords found, use probability-based decision
-  console.log(`❓ UNCLEAR: Using probability fallback (${Math.round(probability * 100)}%)`);
-  
-  if (probability >= 0.7) {
-    console.log('⚪ HIGH CONFIDENCE: Defaulting to PLASTIC');
-    return 'PLASTIC_BOTTLE';
-  } else if (probability >= 0.4) {
-    console.log('⚪ MEDIUM CONFIDENCE: Defaulting to METAL');
-    return 'METAL_CAN';
-  } else {
-    console.log('❓ LOW CONFIDENCE: UNKNOWN material');
+  // CRITICAL: Reject low confidence detections
+  if (probability < SYSTEM_CONFIG.detection.minConfidence) {
+    console.log(`❌ REJECTED: Confidence too low (${confidencePercent}% < ${SYSTEM_CONFIG.detection.minConfidence * 100}%)`);
+    console.log('💡 Action: Please remove item and try again');
+    console.log('   - Check camera focus and lighting');
+    console.log('   - Ensure item is clearly visible');
+    console.log('   - Position item in center of camera view');
+    console.log('========================================\n');
     return 'UNKNOWN';
   }
+  
+  // Metal can detection (check first - most specific)
+  if (className.includes('易拉罐') || 
+      className.includes('metal') || 
+      className.includes('can') ||
+      className.includes('tin') ||
+      className.includes('aluminum') ||
+      className.includes('aluminium') ||
+      className.includes('铁罐') ||
+      className.includes('金属') ||
+      className.includes('铝罐') ||
+      className.includes('铝')) {
+    console.log(`✅ METAL_CAN detected (${confidencePercent}%)`);
+    console.log('🟡 Will sort to: Position 02 (Metal bin)');
+    console.log('========================================\n');
+    return 'METAL_CAN';
+  }
+  
+  // Plastic bottle detection
+  if (className.includes('pet') || 
+      className.includes('plastic') || 
+      className.includes('bottle') ||
+      className.includes('瓶') ||
+      className.includes('塑料') ||
+      className.includes('饮料')) {
+    console.log(`✅ PLASTIC_BOTTLE detected (${confidencePercent}%)`);
+    console.log('🔵 Will sort to: Position 03 (Plastic bin)');
+    console.log('========================================\n');
+    return 'PLASTIC_BOTTLE';
+  }
+  
+  // Glass detection
+  if (className.includes('玻璃') || 
+      className.includes('glass')) {
+    console.log(`✅ GLASS detected (${confidencePercent}%)`);
+    console.log('🟢 Will sort to: Position 03 (Glass bin)');
+    console.log('========================================\n');
+    return 'GLASS';
+  }
+  
+  // No keyword match
+  console.log(`⚠️ WARNING: No keyword match in className`);
+  console.log(`   Confidence: ${confidencePercent}%`);
+  console.log(`   Decision: UNKNOWN (cannot classify)`);
+  console.log('========================================\n');
+  return 'UNKNOWN';
 }
 
 // ======= STEP 1: GATE OPEN =======
@@ -291,9 +325,10 @@ async function closeGate() {
 // ======= OPTIMIZED FAST CYCLE =======
 async function executeFastCycle() {
   console.log('\n========================================');
-  console.log('🚀 STARTING FAST CYCLE v7.4');
+  console.log('🚀 STARTING FAST CYCLE v7.5');
   console.log('========================================');
   console.log(`📍 Material: ${latestAIResult.materialType}`);
+  console.log(`📊 Confidence: ${latestAIResult.matchRate}%`);
   console.log(`⚖️ Weight: ${latestWeight.weight}g`);
   console.log('========================================\n');
   
@@ -335,6 +370,7 @@ async function executeFastCycle() {
     mqttClient.publish(`rvm/${DEVICE_ID}/cycle_complete`, JSON.stringify({
       material: latestAIResult.materialType,
       weight: latestWeight.weight,
+      confidence: latestAIResult.matchRate,
       timestamp: new Date().toISOString(),
       cycleType: 'fast'
     }));
@@ -500,34 +536,43 @@ function connectWebSocket() {
         return;
       }
       
-      // AI Photo result - IMPROVED DEBUGGING
+      // AI Photo result
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
         
-        console.log('\n🤖 ====== AI RAW DATA ======');
-        console.log('   Class Name:', aiData.className);
-        console.log('   Probability:', probability);
-        console.log('   Full AI Data:', JSON.stringify(aiData));
-        console.log('============================\n');
+        console.log(`\n🔍 DEBUG - AI Raw Response:`);
+        console.log(`   className: "${aiData.className}"`);
+        console.log(`   probability: ${probability}`);
+        console.log(`   taskId: ${aiData.taskId}`);
         
         latestAIResult = {
           matchRate: Math.round(probability * 100),
           materialType: determineMaterialType(aiData),
           className: aiData.className || '',
-          rawClassName: aiData.className || '',
-          probability: probability,
           taskId: aiData.taskId,
           timestamp: new Date().toISOString()
         };
         
-        console.log(`🤖 FINAL DECISION: ${latestAIResult.materialType} (${latestAIResult.matchRate}% confidence)`);
+        console.log(`🤖 AI FINAL RESULT: ${latestAIResult.matchRate}% - ${latestAIResult.materialType}`);
         
         mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
         
-        // Auto-cycle: get weight after AI
-        if (autoCycleEnabled && latestAIResult.matchRate >= 30 && latestAIResult.materialType !== 'UNKNOWN') {
+        // UPDATED: Require 50% confidence AND valid material type
+        if (autoCycleEnabled && 
+            latestAIResult.matchRate >= 50 &&  // Changed from 30 to 50
+            latestAIResult.materialType !== 'UNKNOWN') {
+          console.log('✅ High confidence detection - proceeding to weight...\n');
           setTimeout(() => executeCommand({ action: 'getWeight' }), 500);
+        } else if (latestAIResult.materialType === 'UNKNOWN') {
+          console.log('⚠️ Item not recognized or confidence too low');
+          console.log('   Action: Item will be rejected - gate will remain open\n');
+          // Optional: close and reopen gate to reject item
+          // setTimeout(async () => {
+          //   await executeCommand({ action: 'closeGate' });
+          //   await delay(2000);
+          //   await executeCommand({ action: 'openGate' });
+          // }, 1000);
         }
         return;
       }
@@ -574,7 +619,7 @@ function connectWebSocket() {
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         if (code === 4 && autoCycleEnabled && !cycleInProgress) {
-          console.log('👤 Object detected - Starting process...');
+          console.log('👤 Object detected - Taking photo...');
           setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
         }
         return;
@@ -606,7 +651,6 @@ mqttClient.on('connect', () => {
   
   mqttClient.subscribe(`rvm/${DEVICE_ID}/commands`);
   mqttClient.subscribe(`rvm/${DEVICE_ID}/control/auto`);
-  mqttClient.subscribe(`rvm/${DEVICE_ID}/material_override`); // NEW: Material override
   
   connectWebSocket();
   setTimeout(requestModuleId, 2000);
@@ -616,6 +660,7 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
+    // Auto mode control
     if (topic.includes('/control/auto')) {
       autoCycleEnabled = payload.enabled === true;
       console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ENABLED' : 'DISABLED'}`);
@@ -628,26 +673,40 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
-    // NEW: Manual material override
-    if (topic.includes('/material_override')) {
-      console.log(`🎯 MANUAL OVERRIDE: ${payload.material}`);
-      if (latestAIResult) {
-        latestAIResult.materialType = payload.material;
-        latestAIResult.manualOverride = true;
-        console.log(`✅ Material overridden to: ${payload.material}`);
-        
-        // Start cycle if ready
-        if (latestWeight && latestWeight.weight > 1 && !cycleInProgress) {
-          cycleInProgress = true;
-          setTimeout(() => executeFastCycle(), 1000);
-        }
-      }
-      return;
-    }
-    
+    // Command handling
     if (topic.includes('/commands')) {
       console.log(`📩 Command: ${payload.action}`);
       
+      // MANUAL MATERIAL OVERRIDE
+      if (payload.action === 'setMaterial') {
+        const validMaterials = ['METAL_CAN', 'PLASTIC_BOTTLE', 'GLASS'];
+        if (validMaterials.includes(payload.materialType)) {
+          latestAIResult = {
+            matchRate: 100,
+            materialType: payload.materialType,
+            className: 'MANUAL_OVERRIDE',
+            taskId: 'manual_' + Date.now(),
+            timestamp: new Date().toISOString()
+          };
+          console.log(`\n🔧 MANUAL MATERIAL OVERRIDE`);
+          console.log(`   Material set to: ${payload.materialType}`);
+          console.log(`   Confidence: 100% (manual)\n`);
+          
+          mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
+          
+          // Trigger weight check if auto mode enabled
+          if (autoCycleEnabled) {
+            console.log('   Triggering weight measurement...\n');
+            setTimeout(() => executeCommand({ action: 'getWeight' }), 500);
+          }
+        } else {
+          console.log(`❌ Invalid material type: ${payload.materialType}`);
+          console.log(`   Valid types: ${validMaterials.join(', ')}\n`);
+        }
+        return;
+      }
+      
+      // Regular command handling
       if (!currentModuleId) {
         pendingCommands.set(Date.now().toString(), payload);
         await requestModuleId();
@@ -671,21 +730,30 @@ process.on('SIGINT', () => {
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v7.4 - FIXED MATERIAL DETECTION');
+console.log('🚀 RVM AGENT v7.5 - FAST CYCLE');
 console.log(`📱 Device: ${DEVICE_ID}`);
 console.log('========================================');
-console.log('🔧 KEY IMPROVEMENTS:');
-console.log('   ✅ Enhanced AI material classification');
-console.log('   ✅ Better metal detection (易拉罐, 铝罐, metal, can)');
-console.log('   ✅ Better plastic detection (塑料, pet, plastic, 瓶)');
-console.log('   ✅ Better glass detection (玻璃, glass)');
-console.log('   ✅ Detailed AI debugging output');
-console.log('   ✅ Manual material override via MQTT');
+console.log('🔧 OPTIMIZED PROCESS:');
+console.log('   1. Gate opens → Place bottle');
+console.log('   2. Belt moves to weight (type 02, 3s)');
+console.log('   3. Belt continues to stepper (type 03, 4s)');
+console.log('   4. Stepper tilts (4s) → Dump to crusher');
+console.log('   5. Compactor crushes (4s)');
+console.log('   6. Belt returns (5s)');
+console.log('   7. Stepper resets (6s)');
+console.log('   8. Gate closes (1s)');
+console.log('   ⏱️  TOTAL: ~25 seconds');
 console.log('========================================');
-console.log('🎯 MANUAL OVERRIDE USAGE:');
-console.log('   Send MQTT to: rvm/RVM-3101/material_override');
-console.log('   { "material": "METAL_CAN" }');
-console.log('   { "material": "PLASTIC_BOTTLE" }');
-console.log('   { "material": "GLASS" }');
+console.log('🎯 DETECTION SETTINGS:');
+console.log(`   Minimum confidence: ${SYSTEM_CONFIG.detection.minConfidence * 100}%`);
+console.log('   Material thresholds:');
+console.log(`   - Metal cans: ${SYSTEM_CONFIG.detection.thresholdByMaterial.METAL_CAN * 100}%`);
+console.log(`   - Plastic: ${SYSTEM_CONFIG.detection.thresholdByMaterial.PLASTIC_BOTTLE * 100}%`);
+console.log(`   - Glass: ${SYSTEM_CONFIG.detection.thresholdByMaterial.GLASS * 100}%`);
+console.log('========================================');
+console.log('📡 MANUAL OVERRIDE COMMAND:');
+console.log('   Topic: rvm/RVM-3101/commands');
+console.log('   Payload: {"action":"setMaterial","materialType":"METAL_CAN"}');
+console.log('   Valid types: METAL_CAN, PLASTIC_BOTTLE, GLASS');
 console.log('========================================\n');
 console.log('⏳ Waiting for connections...\n');
