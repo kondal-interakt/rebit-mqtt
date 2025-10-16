@@ -35,7 +35,7 @@ const SYSTEM_CONFIG = {
   
   // STEPPER MOTOR POSITION CODES (Module 0F)
   stepper: {
-    moduleId: '0F',  // Stepper motor has its own module ID!
+    moduleId: '09',  // Stepper motor has its own module ID!
     positions: {
       initialization: '00',   // Full initialization
       home: '01',            // Return to origin (flat basket position)
@@ -395,7 +395,8 @@ async function executeCommand(commandData) {
     console.log(`   📡 Stepper API call with moduleId="${stepperModuleId}", position="${positionCode}"`);
     
     apiPayload = { 
-      moduleId: stepperModuleId,  // CRITICAL: Use 0F for stepper
+      moduleId: stepperModuleId,
+      id :positionCode,  // CRITICAL: Use 0F for stepper
       type: positionCode,
       deviceType 
     };
