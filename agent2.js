@@ -531,7 +531,7 @@ function connectWebSocket() {
         if (latestWeight.weight > 0) calibrationAttempts = 0;
         
         // Start cycle if conditions met
-        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
+        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 1 && !cycleInProgress) {
           cycleInProgress = true;
           setTimeout(() => executeFullCycle(), 1000);
         }
