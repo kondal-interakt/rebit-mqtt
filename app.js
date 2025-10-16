@@ -1,9 +1,10 @@
-// RVM Agent v7.4 - FIXED BELT MOVEMENT (SAME API ENDPOINTS)
+// RVM Agent v7.4 - FIXED BELT MOVEMENT WITH PROPER KEEP-ALIVE
 // FIXES:
 // - Improved belt timing with retry logic
 // - Same API endpoints and command structure
 // - Enhanced error recovery
-// Save as: agent-v7.4-fixed-belt-same-api.js
+// - Proper keep-alive to prevent automatic exit
+// Save as: agent-v7.4-complete-fixed.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -237,7 +238,7 @@ async function beltReverseToStart() {
       if (retryCount < SYSTEM_CONFIG.applet.maxRetries) {
         await executeCommand({ 
           action: 'customMotor', 
-          params: SYSTEM_CONFIG.belt.stop
+          params: SYSTEMSTEM_CONFIG.belt.stop
         });
         
         await delay(SYSTEM_CONFIG.applet.timeouts.retryDelay);
@@ -532,11 +533,205 @@ async function executeCommand(commandData) {
   }
 }
 
-// ======= ALL OTHER FUNCTIONS REMAIN EXACTLY THE SAME =======
-// requestModuleId(), connectWebSocket(), determineMaterialType(), MQTT setup, etc.
-// [Keep all the remaining code exactly as in your original v7.3]
+// ======= REQUEST MODULE ID =======
+async function requestModuleId() {
+  try {
+    console.log('📡 Requesting module ID...');
+    await axios.post(`${LOCAL_API_BASE}/system/serial/getModuleId`, {}, {
+      timeout: 5000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    console.error('❌ Module ID request failed:', err.message);
+  }
+}
 
-// ======= STARTUP MESSAGE =======
+// ======= WEBSOCKET CONNECTION =======
+function connectWebSocket() {
+  ws = new WebSocket(WS_URL);
+  
+  ws.on('open', () => {
+    console.log('✅ WebSocket connected');
+    setTimeout(() => requestModuleId(), 1000);
+  });
+  
+  ws.on('message', async (data) => {
+    try {
+      const message = JSON.parse(data);
+      
+      // Module ID response
+      if (message.function === '01') {
+        currentModuleId = message.moduleId || message.data;
+        console.log(`✅ Module ID received: ${currentModuleId}`);
+        
+        // Process any pending commands
+        if (pendingCommands.size > 0) {
+          const [id, cmd] = Array.from(pendingCommands.entries())[0];
+          executeCommand(cmd);
+          pendingCommands.delete(id);
+        }
+        return;
+      }
+      
+      // AI Photo result
+      if (message.function === 'aiPhoto') {
+        const aiData = JSON.parse(message.data);
+        const probability = aiData.probability || 0;
+        
+        latestAIResult = {
+          matchRate: Math.round(probability * 100),
+          materialType: determineMaterialType(aiData),
+          className: aiData.className || '',
+          taskId: aiData.taskId,
+          timestamp: new Date().toISOString()
+        };
+        
+        console.log(`🤖 AI Result: ${latestAIResult.matchRate}% - ${latestAIResult.materialType}`);
+        
+        mqttClient.publish(`rvm/${DEVICE_ID}/ai_result`, JSON.stringify(latestAIResult));
+        
+        // Auto-cycle: get weight after AI
+        if (autoCycleEnabled && latestAIResult.matchRate >= 30 && latestAIResult.materialType !== 'UNKNOWN') {
+          setTimeout(() => executeCommand({ action: 'getWeight' }), 500);
+        }
+        return;
+      }
+      
+      // Weight result
+      if (message.function === '06') {
+        const weightValue = parseFloat(message.data) || 0;
+        const weightCoefficient = SYSTEM_CONFIG.applet.weightCoefficients[1];
+        const calibratedWeight = weightValue * (weightCoefficient / 1000);
+        
+        latestWeight = {
+          weight: Math.round(calibratedWeight * 10) / 10,
+          rawWeight: weightValue,
+          coefficient: weightCoefficient,
+          timestamp: new Date().toISOString()
+        };
+        
+        console.log(`⚖️ Weight: ${latestWeight.weight}g (raw: ${weightValue})`);
+        
+        mqttClient.publish(`rvm/${DEVICE_ID}/weight_result`, JSON.stringify(latestWeight));
+        
+        // Calibrate if needed
+        if (latestWeight.weight <= 0 && calibrationAttempts < 2) {
+          calibrationAttempts++;
+          console.log(`⚠️ Calibrating weight (${calibrationAttempts}/2)...`);
+          setTimeout(async () => {
+            await executeCommand({ action: 'calibrateWeight' });
+            setTimeout(() => executeCommand({ action: 'getWeight' }), 1000);
+          }, 500);
+          return;
+        }
+        
+        if (latestWeight.weight > 0) calibrationAttempts = 0;
+        
+        // Start cycle if conditions met
+        if (autoCycleEnabled && latestAIResult && latestWeight.weight > 10 && !cycleInProgress) {
+          cycleInProgress = true;
+          setTimeout(() => executeFullCycle(), 1000);
+        }
+        return;
+      }
+      
+      // Device status (object detection)
+      if (message.function === 'deviceStatus') {
+        const code = parseInt(message.data) || -1;
+        if (code === 4 && autoCycleEnabled && !cycleInProgress) {
+          console.log('👤 Object detected by sensor');
+          setTimeout(() => executeCommand({ action: 'takePhoto' }), 1000);
+        }
+        return;
+      }
+      
+    } catch (err) {
+      console.error('❌ WebSocket message error:', err.message);
+    }
+  });
+  
+  ws.on('close', () => {
+    console.log('⚠️ WebSocket closed, reconnecting in 5s...');
+    setTimeout(connectWebSocket, 5000);
+  });
+  
+  ws.on('error', (err) => console.error('❌ WebSocket error:', err.message));
+}
+
+// ======= UTILITY FUNCTIONS =======
+function determineMaterialType(aiData) {
+  const className = (aiData.className || '').toLowerCase();
+  
+  if (className.includes('pet') || className.includes('plastic') || className.includes('瓶')) {
+    return 'PLASTIC_BOTTLE';
+  }
+  if (className.includes('易拉罐') || className.includes('metal') || className.includes('can')) {
+    return 'METAL_CAN';
+  }
+  if (className.includes('玻璃') || className.includes('glass')) {
+    return 'GLASS';
+  }
+  
+  return aiData.probability >= 0.5 ? 'PLASTIC_BOTTLE' : 'UNKNOWN';
+}
+
+// ======= MQTT CONNECTION =======
+const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
+  username: MQTT_USERNAME,
+  password: MQTT_PASSWORD,
+  ca: fs.readFileSync(MQTT_CA_FILE),
+  rejectUnauthorized: false
+});
+
+mqttClient.on('connect', () => {
+  console.log('✅ MQTT connected');
+  
+  // Subscribe to control topics
+  mqttClient.subscribe(`rvm/${DEVICE_ID}/commands`);
+  mqttClient.subscribe(`rvm/${DEVICE_ID}/control/auto`);
+  
+  // Start WebSocket connection
+  connectWebSocket();
+  
+  // Request module ID after connection
+  setTimeout(requestModuleId, 2000);
+});
+
+mqttClient.on('message', async (topic, message) => {
+  try {
+    const payload = JSON.parse(message.toString());
+    
+    // Auto mode control
+    if (topic.includes('/control/auto')) {
+      autoCycleEnabled = payload.enabled === true;
+      console.log(`🤖 AUTO MODE: ${autoCycleEnabled ? 'ENABLED' : 'DISABLED'}`);
+      
+      if (autoCycleEnabled && currentModuleId) {
+        await executeCommand({ action: 'openGate' });
+      } else if (!autoCycleEnabled && currentModuleId) {
+        await executeCommand({ action: 'closeGate' });
+      }
+      return;
+    }
+    
+    // Manual commands
+    if (topic.includes('/commands')) {
+      console.log(`📩 Command received: ${payload.action}`);
+      
+      if (!currentModuleId) {
+        pendingCommands.set(Date.now().toString(), payload);
+        await requestModuleId();
+      } else {
+        await executeCommand(payload);
+      }
+    }
+    
+  } catch (err) {
+    console.error('❌ MQTT message error:', err.message);
+  }
+});
+
+// ======= KEEP ALIVE AND INITIALIZATION =======
 console.log('========================================');
 console.log('🚀 RVM AGENT v7.4 - FIXED BELT MOVEMENT');
 console.log(`📱 Device: ${DEVICE_ID}`);
@@ -560,3 +755,55 @@ console.log('   7. Belt reverse (15s) → start WITH RETRY');
 console.log('   8. Stepper reset → flat position');
 console.log('   9. Gate closes');
 console.log('========================================\n');
+
+// Keep the process alive
+const keepAliveInterval = setInterval(() => {
+  // Just keep the process running
+}, 60000); // Check every minute
+
+// Global error handlers to prevent crashes
+process.on('uncaughtException', (error) => {
+  console.error('🛑 Uncaught Exception:', error.message);
+  console.log('🔧 Continuing operation...');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🛑 Unhandled Rejection at:', promise, 'reason:', reason);
+  console.log('🔧 Continuing operation...');
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Received shutdown signal...');
+  console.log('⏹️ Closing WebSocket...');
+  if (ws) ws.close();
+  
+  console.log('⏹️ Closing MQTT connection...');
+  mqttClient.end();
+  
+  console.log('⏹️ Clearing intervals...');
+  clearInterval(keepAliveInterval);
+  
+  console.log('👋 RVM Agent shutdown complete');
+  process.exit(0);
+});
+
+console.log('🚀 RVM Agent started successfully!');
+console.log('⏳ Waiting for connections and sensor triggers...');
+console.log('💡 Press Ctrl+C to stop the agent\n');
+
+// Health monitor
+setInterval(() => {
+  const status = {
+    timestamp: new Date().toISOString(),
+    moduleId: currentModuleId,
+    autoCycle: autoCycleEnabled,
+    cycleInProgress: cycleInProgress,
+    wsReady: ws && ws.readyState === WebSocket.OPEN,
+    mqttReady: mqttClient.connected
+  };
+  
+  if (Date.now() % 120000 < 1000) { // Log every 2 minutes
+    console.log('💓 Agent Status:', JSON.stringify(status));
+  }
+}, 30000); // Check every 30 seconds
