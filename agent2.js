@@ -15,7 +15,7 @@ const WebSocket = require('ws');
 const SYSTEM_CONFIG = {
   // Belt commands (Motor 02)
   belt: {
-    forward: { motorId: "02", type: "02" },  // Move to weight/AI position
+    forward: { motorId: "02", type: "03" },  // Move to weight/AI position
     reverse: { motorId: "02", type: "01" },  // Return to start
     stop: { motorId: "02", type: "00" }      // Stop belt
   },
