@@ -1,5 +1,5 @@
-// RVM Agent v8.1 - PRODUCTION WITH QR CODE
-// - Built-in QR scanner support
+// RVM Agent v8.1 - PRODUCTION WITH QR CODE + DEBUG
+// - Built-in QR scanner support with debug logging
 // - User ID tracking
 // - Clean production logs
 // - Publishes complete transaction data to MQTT
@@ -377,6 +377,13 @@ function connectWebSocket() {
     try {
       const message = JSON.parse(data);
       
+      // ===== DEBUG: LOG ALL INCOMING MESSAGES =====
+      console.log('\n🔍 WebSocket Message Received:');
+      console.log('   Function:', message.function);
+      console.log('   Data:', message.data);
+      console.log('   Full message:', JSON.stringify(message, null, 2));
+      console.log('---');
+      
       // Module ID response
       if (message.function === '01') {
         state.moduleId = message.moduleId || message.data;
@@ -388,6 +395,9 @@ function connectWebSocket() {
       if (message.function === 'qrcode') {
         const qrCodeData = message.data;
         console.log(`\n📱 QR Code scanned: ${qrCodeData}`);
+        console.log(`📏 Length: ${qrCodeData ? qrCodeData.length : 0}`);
+        console.log(`🔧 Module ID: ${state.moduleId || 'NOT SET'}`);
+        console.log(`🤖 Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
         
         // Validate QR code (8-16 characters as per documentation)
         if (qrCodeData && qrCodeData.length >= 8 && qrCodeData.length <= 16) {
@@ -409,17 +419,31 @@ function connectWebSocket() {
             { qos: 1 }
           );
           
+          console.log('📤 Published QR scan to MQTT');
+          
           // Enable auto mode and open gate
           if (!state.autoCycleEnabled) {
             console.log('🤖 Auto-enabling from QR scan...');
             state.autoCycleEnabled = true;
-            await executeCommand('openGate');
-            console.log('🚪 Gate opened - Ready for bottle\n');
+            
+            if (!state.moduleId) {
+              console.log('⚠️ Module ID not available! Cannot open gate!');
+              return;
+            }
+            
+            try {
+              console.log('🚪 Attempting to open gate...');
+              await executeCommand('openGate');
+              console.log('✅ Gate opened - Ready for bottle\n');
+            } catch (error) {
+              console.error('❌ Failed to open gate:', error.message);
+            }
           } else {
             console.log('🤖 Auto mode already enabled\n');
           }
         } else {
-          console.log('⚠️ Invalid QR code format (must be 8-16 characters)\n');
+          console.log(`⚠️ Invalid QR code format (must be 8-16 characters)`);
+          console.log(`   Got: "${qrCodeData}" (${qrCodeData ? qrCodeData.length : 0} chars)\n`);
         }
         return;
       }
@@ -505,6 +529,7 @@ function connectWebSocket() {
       // Object detection
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
+        console.log(`📡 Device Status: ${code}`);
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
           console.log('👤 Object detected');
           setTimeout(() => executeCommand('takePhoto'), 1000);
@@ -513,7 +538,8 @@ function connectWebSocket() {
       }
       
     } catch (error) {
-      console.error('❌ WebSocket error:', error.message);
+      console.error('❌ WebSocket message error:', error.message);
+      console.error('   Raw data:', data.toString());
     }
   });
   
@@ -630,7 +656,7 @@ process.on('SIGINT', () => {
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v8.1 - PRODUCTION');
+console.log('🚀 RVM AGENT v8.1 - PRODUCTION + DEBUG');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log('========================================');
 console.log('📡 MQTT Topics:');
@@ -647,5 +673,8 @@ console.log('========================================');
 console.log('📱 QR Code Support: ENABLED');
 console.log('   Format: 8-16 character string');
 console.log('   Auto-enable: YES');
+console.log('========================================');
+console.log('🔍 DEBUG MODE: ON');
+console.log('   All WebSocket messages will be logged');
 console.log('========================================\n');
 console.log('⏳ Connecting...\n');
