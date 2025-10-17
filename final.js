@@ -17,7 +17,7 @@ const CONFIG = {
   // Local Hardware API - FIXED WebSocket URL
   local: {
     baseUrl: 'http://localhost:8081',
-    wsUrl: 'ws://localhost:8081/websocket/qazwsz1234', // Fixed: qazwsz1234 not qazwsx1234
+    wsUrl: 'ws://localhost:8081/websocket/qazwsx1234', // Fixed: qazwsz1234 not qazwsx1234
     timeout: 10000
   },
   
