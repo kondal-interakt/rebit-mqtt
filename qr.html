@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>RVM QR Code Scanner</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #f0f0f0; }
+        #scanInput { width: 100%; padding: 10px; font-size: 16px; }
+        #status { color: green; margin: 10px 0; }
+        #lastScan { color: blue; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h2>RVM QR Code Scanner Active</h2>
+    <input autofocus type="text" id="scanInput" placeholder="Focus here and scan QR with RVM scanner...">
+    <p id="status">Connecting to WebSocket...</p>
+    <p id="lastScan">Last scanned: None</p>
+
+    <script>
+        let ws;
+        let scanData = '';
+        let lastKeyTime = 0;
+        const scanThreshold = 50; // ms threshold to detect new scan vs. typing
+
+        // Connect to middle tier WebSocket
+        ws = new WebSocket('ws://localhost:8081/websocket/qazwsx1234');
+
+        ws.onopen = function() {
+            document.getElementById('status').innerText = '✅ Connected - Focus input and scan QR';
+            console.log('WS Connected');
+        };
+
+        ws.onmessage = function(e) {
+            console.log('Received from middle tier:', e.data);
+            // Optional: Handle any responses (e.g., ack)
+        };
+
+        ws.onclose = function() {
+            document.getElementById('status').innerText = '⚠️ WS Closed - Reconnecting...';
+            console.log('WS Closed');
+            setTimeout(() => location.reload(), 3000);
+        };
+
+        ws.onerror = function(evt) {
+            document.getElementById('status').innerText = '❌ WS Error: ' + (evt.message || 'Unknown');
+            console.error('WS Error:', evt);
+        };
+
+        // Monitor keyboard for scanner input (HID mode)
+        document.getElementById('scanInput').addEventListener('keydown', function(event) {
+            const currentTime = new Date().getTime();
+            if (currentTime - lastKeyTime > scanThreshold) {
+                scanData = ''; // New scan detected
+            }
+            scanData += event.key;
+            lastKeyTime = currentTime;
+
+            if (event.key === 'Enter') {
+                console.log('Scanned Data:', scanData);
+                
+                // Validate: 8-16 digits (as per typical user IDs)
+                if (scanData.length >= 8 && scanData.length <= 16 && /^\d+$/.test(scanData)) {
+                    // Send to middle tier as JSON (matches doc format)
+                    const qrMessage = { function: 'qrcode', data: scanData };
+                    ws.send(JSON.stringify(qrMessage));
+                    
+                    document.getElementById('lastScan').innerText = `Last scanned & sent: ${scanData}`;
+                    document.getElementById('status').innerText = '✅ QR Sent to RVM - Ready for next';
+                    console.log('QR Sent to Middle Tier:', qrMessage);
+                } else {
+                    document.getElementById('status').innerText = `⚠️ Invalid QR: "${scanData}" (8-16 digits only)`;
+                    console.warn('Invalid QR:', scanData);
+                }
+                
+                scanData = ''; // Reset
+                event.preventDefault(); // Prevent default Enter behavior
+            }
+        });
+
+        // Cleanup
+        window.onbeforeunload = function() { if (ws) ws.close(); };
+    </script>
+</body>
+</html>
