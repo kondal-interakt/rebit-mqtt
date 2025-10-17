@@ -1,9 +1,7 @@
 // RVM Agent v8.1 - PRODUCTION WITH QR CODE + DEBUG
-// - Built-in QR scanner support with debug logging
-// - User ID tracking
-// - Clean production logs
-// - Publishes complete transaction data to MQTT
-// Save as: agent-v8.1-production.js
+// - Fixed QR code detection and automatic gate opening
+// - Enhanced WebSocket message handling
+// - Better error handling and debugging
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -16,10 +14,10 @@ const CONFIG = {
     id: 'RVM-3101'
   },
   
-  // Local Hardware API
+  // Local Hardware API - FIXED WebSocket URL
   local: {
     baseUrl: 'http://localhost:8081',
-    wsUrl: 'ws://localhost:8081/websocket/qazwsx1234',
+    wsUrl: 'ws://localhost:8081/websocket/qazwsz1234', // Fixed: qazwsz1234 not qazwsx1234
     timeout: 10000
   },
   
@@ -135,6 +133,82 @@ function determineMaterialType(aiData) {
   }
   
   return materialType;
+}
+
+// ======= DEDICATED QR CODE HANDLER =======
+async function handleQRCodeData(qrData) {
+  const qrCodeData = qrData.toString().trim();
+  
+  console.log(`\n📱 QR CODE SCANNED!`);
+  console.log(`   Raw data: "${qrCodeData}"`);
+  console.log(`   Length: ${qrCodeData.length}`);
+  console.log(`   Module ID: ${state.moduleId || 'NOT SET'}`);
+  console.log(`   Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
+  
+  // Validate QR code format (8-16 digits as per document)
+  if (qrCodeData && qrCodeData.length >= 8 && qrCodeData.length <= 16 && /^\d+$/.test(qrCodeData)) {
+    console.log('✅ Valid QR code format detected');
+    console.log(`👤 User ID: ${qrCodeData}`);
+    
+    // Store user info
+    state.currentUserId = qrCodeData;
+    state.scanTimestamp = new Date().toISOString();
+    
+    // Publish QR scan event to MQTT
+    mqttClient.publish(
+      CONFIG.mqtt.topics.qrScanned,
+      JSON.stringify({
+        userId: qrCodeData,
+        deviceId: CONFIG.device.id,
+        timestamp: state.scanTimestamp,
+        moduleId: state.moduleId
+      }),
+      { qos: 1 }
+    );
+    
+    console.log('📤 Published QR scan to MQTT');
+    
+    // Enable auto mode and open gate
+    if (!state.autoCycleEnabled) {
+      console.log('🤖 Auto-enabling from QR scan...');
+      state.autoCycleEnabled = true;
+    }
+    
+    // Always try to open gate when QR is scanned (if moduleId available)
+    if (state.moduleId) {
+      try {
+        console.log('🚪 Opening gate with module ID:', state.moduleId);
+        await executeCommand('openGate');
+        console.log('✅ Gate opened successfully - Ready for bottle\n');
+        
+        // Publish status update
+        mqttClient.publish(
+          CONFIG.mqtt.topics.status,
+          JSON.stringify({
+            deviceId: CONFIG.device.id,
+            status: 'ready',
+            autoMode: true,
+            userId: state.currentUserId,
+            timestamp: new Date().toISOString()
+          }),
+          { retain: true }
+        );
+        
+      } catch (error) {
+        console.error('❌ Failed to open gate:', error.message);
+        console.log('🔧 Please check if the middle layer service is running on port 8081');
+      }
+    } else {
+      console.log('❌ Cannot open gate: Module ID not available');
+      console.log('🔄 Requesting module ID...');
+      await requestModuleId();
+    }
+  } else {
+    console.log(`⚠️ Invalid QR code format`);
+    console.log(`   Expected: 8-16 digit number`);
+    console.log(`   Received: "${qrCodeData}" (${qrCodeData.length} chars)`);
+    console.log(`   Is numeric: ${/^\d+$/.test(qrCodeData)}\n`);
+  }
 }
 
 // ======= HARDWARE COMMANDS =======
@@ -369,88 +443,53 @@ function connectWebSocket() {
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
   state.ws.on('open', () => {
-    console.log('✅ WebSocket connected');
+    console.log('✅ WebSocket connected to:', CONFIG.local.wsUrl);
+    console.log('📡 Waiting for QR codes and other events...');
     setTimeout(() => requestModuleId(), 1000);
   });
   
   state.ws.on('message', async (data) => {
     try {
-      const message = JSON.parse(data);
+      const rawMessage = data.toString().trim();
+      console.log('\n🔍 RAW WebSocket Message:', rawMessage);
       
-      // ===== DEBUG: LOG ALL INCOMING MESSAGES =====
-      console.log('\n🔍 WebSocket Message Received:');
-      console.log('   Function:', message.function);
-      console.log('   Data:', message.data);
+      let message;
+      try {
+        message = JSON.parse(rawMessage);
+      } catch (parseError) {
+        console.log('⚠️ Non-JSON message, treating as QR code data');
+        // Handle raw string as potential QR code
+        await handleQRCodeData(rawMessage);
+        return;
+      }
+      
+      // ===== DEBUG: LOG STRUCTURED MESSAGE =====
+      console.log('📦 PARSED WebSocket Message:');
+      console.log('   Keys:', Object.keys(message));
       console.log('   Full message:', JSON.stringify(message, null, 2));
-      console.log('---');
       
-      // Module ID response
-      if (message.function === '01') {
-        state.moduleId = message.moduleId || message.data;
+      // Module ID response - FIXED based on document
+      if (message.function === "01" || message.data === "1") {
+        state.moduleId = message.data || "05"; // Default to "05" if not provided
         console.log(`✅ Module ID: ${state.moduleId}`);
         return;
       }
       
-      // QR Code Scanner
-      if (message.function === 'qrcode') {
-        const qrCodeData = message.data;
-        console.log(`\n📱 QR Code scanned: ${qrCodeData}`);
-        console.log(`📏 Length: ${qrCodeData ? qrCodeData.length : 0}`);
-        console.log(`🔧 Module ID: ${state.moduleId || 'NOT SET'}`);
-        console.log(`🤖 Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
+      // QR Code Scanner - MULTIPLE POSSIBLE FORMATS
+      if (message.function === 'qrcode' || 
+          message.function === 'QRCODE' || 
+          message.qrcode || 
+          message.qr || 
+          message.data && (message.data.length >= 8 && message.data.length <= 16)) {
         
-        // Validate QR code (8-16 characters as per documentation)
-        if (qrCodeData && qrCodeData.length >= 8 && qrCodeData.length <= 16) {
-          console.log('✅ Valid QR code');
-          console.log(`👤 User ID: ${qrCodeData}`);
-          
-          // Store user info
-          state.currentUserId = qrCodeData;
-          state.scanTimestamp = new Date().toISOString();
-          
-          // Publish QR scan event
-          mqttClient.publish(
-            CONFIG.mqtt.topics.qrScanned,
-            JSON.stringify({
-              userId: qrCodeData,
-              deviceId: CONFIG.device.id,
-              timestamp: state.scanTimestamp
-            }),
-            { qos: 1 }
-          );
-          
-          console.log('📤 Published QR scan to MQTT');
-          
-          // Enable auto mode and open gate
-          if (!state.autoCycleEnabled) {
-            console.log('🤖 Auto-enabling from QR scan...');
-            state.autoCycleEnabled = true;
-            
-            if (!state.moduleId) {
-              console.log('⚠️ Module ID not available! Cannot open gate!');
-              return;
-            }
-            
-            try {
-              console.log('🚪 Attempting to open gate...');
-              await executeCommand('openGate');
-              console.log('✅ Gate opened - Ready for bottle\n');
-            } catch (error) {
-              console.error('❌ Failed to open gate:', error.message);
-            }
-          } else {
-            console.log('🤖 Auto mode already enabled\n');
-          }
-        } else {
-          console.log(`⚠️ Invalid QR code format (must be 8-16 characters)`);
-          console.log(`   Got: "${qrCodeData}" (${qrCodeData ? qrCodeData.length : 0} chars)\n`);
-        }
+        const qrCodeData = message.data || message.qrcode || message.qr || rawMessage;
+        await handleQRCodeData(qrCodeData);
         return;
       }
       
       // AI Photo result
-      if (message.function === 'aiPhoto') {
-        const aiData = JSON.parse(message.data);
+      if (message.function === 'aiPhoto' || message.aiPhoto) {
+        const aiData = typeof message.data === 'string' ? JSON.parse(message.data) : message.data;
         const probability = aiData.probability || 0;
         
         state.aiResult = {
@@ -485,7 +524,7 @@ function connectWebSocket() {
       }
       
       // Weight result
-      if (message.function === '06') {
+      if (message.function === '06' || message.weight) {
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
         const calibratedWeight = weightValue * (coefficient / 1000);
@@ -526,25 +565,32 @@ function connectWebSocket() {
         return;
       }
       
-      // Object detection
-      if (message.function === 'deviceStatus') {
+      // Object detection / Device status
+      if (message.function === 'deviceStatus' || message.deviceStatus) {
         const code = parseInt(message.data) || -1;
         console.log(`📡 Device Status: ${code}`);
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
-          console.log('👤 Object detected');
+          console.log('👤 Object detected - Taking photo...');
           setTimeout(() => executeCommand('takePhoto'), 1000);
         }
         return;
       }
       
+      // Unknown message format
+      console.log('❓ Unknown message format, but let me check if it contains QR data...');
+      if (rawMessage.length >= 8 && rawMessage.length <= 16 && /^\d+$/.test(rawMessage)) {
+        console.log('🔍 This looks like a QR code! Processing...');
+        await handleQRCodeData(rawMessage);
+      }
+      
     } catch (error) {
-      console.error('❌ WebSocket message error:', error.message);
+      console.error('❌ WebSocket message processing error:', error.message);
       console.error('   Raw data:', data.toString());
     }
   });
   
   state.ws.on('close', () => {
-    console.log('⚠️ WebSocket closed, reconnecting...');
+    console.log('⚠️ WebSocket closed, reconnecting in 5 seconds...');
     setTimeout(connectWebSocket, 5000);
   });
   
@@ -673,6 +719,7 @@ console.log('========================================');
 console.log('📱 QR Code Support: ENABLED');
 console.log('   Format: 8-16 character string');
 console.log('   Auto-enable: YES');
+console.log('   Auto-gate: YES');
 console.log('========================================');
 console.log('🔍 DEBUG MODE: ON');
 console.log('   All WebSocket messages will be logged');
