@@ -20,6 +20,8 @@
       padding: 40px;
       border-radius: 20px;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      width: 80%;
+      max-width: 600px;
     }
     h1 {
       color: #667eea;
@@ -45,24 +47,35 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      margin: 20px 0;
     }
-    /* Hidden input to capture keyboard */
-    #hiddenInput {
-      position: absolute;
-      left: -9999px;
-      width: 1px;
-      height: 1px;
+    /* Input field for scanner - VISIBLE but styled */
+    #scanInput {
+      width: 100%;
+      padding: 15px;
+      font-size: 20px;
+      border: 3px solid #667eea;
+      border-radius: 10px;
+      text-align: center;
+      margin: 20px 0;
+      background: #f9f9f9;
+    }
+    #scanInput:focus {
+      outline: none;
+      border-color: #764ba2;
+      background: white;
     }
   </style>
 </head>
 <body>
-  <!-- Hidden input that captures keyboard from QR scanner -->
-  <input type="text" id="hiddenInput" autofocus />
-
   <div class="container">
     <h1>Scan Your QR Code</h1>
     <div class="scanner-icon">📱</div>
     <div class="status" id="status">Ready to scan...</div>
+    
+    <!-- Input field that captures scanner - MUST BE VISIBLE AND FOCUSED -->
+    <input autofocus type="text" id="scanInput" placeholder="Scan QR code here..." />
+    
     <div class="code-display" id="codeDisplay">Waiting for QR code...</div>
   </div>
 
@@ -70,63 +83,73 @@
     // Configuration
     const CONFIG = {
       deviceId: 'RVM-3101',
-      backendUrl: 'https://rebit-api.ceewen.xyz'  // Your backend URL
+      backendUrl: 'https://rebit-api.ceewen.xyz'
     };
 
     let scanData = '';
     let lastKeyTime = 0;
     const scanThreshold = 50; // Scanner types fast (within 50ms between keys)
 
-    // Keep focus on hidden input
-    const hiddenInput = document.getElementById('hiddenInput');
+    const scanInput = document.getElementById('scanInput');
     const statusDiv = document.getElementById('status');
     const codeDisplay = document.getElementById('codeDisplay');
 
-    // Keep input focused at all times
+    // Keep input focused
     document.addEventListener('click', () => {
-      hiddenInput.focus();
+      scanInput.focus();
     });
 
-    // Prevent input from losing focus
-    hiddenInput.addEventListener('blur', () => {
-      setTimeout(() => hiddenInput.focus(), 10);
+    // Re-focus if it loses focus
+    scanInput.addEventListener('blur', () => {
+      setTimeout(() => scanInput.focus(), 10);
     });
 
-    // Listen for keyboard events from QR scanner
-    hiddenInput.addEventListener('keydown', function(event) {
+    // Listen for keyboard events - EXACTLY like hardware sample
+    scanInput.addEventListener('keydown', function(event) {
       const currentTime = new Date().getTime();
       
-      // If too much time passed, reset (human typing vs scanner)
+      // Reset if too much time passed (human typing vs scanner)
       if (currentTime - lastKeyTime > scanThreshold) {
         scanData = '';
       }
       
+      // Add the key to scanData (including Enter)
+      scanData += event.key;
       lastKeyTime = currentTime;
 
-      // QR scanner sends Enter key at the end
+      // Scanner finishes with Enter key
       if (event.key === 'Enter') {
         event.preventDefault();
         
-        // Remove "Enter" from the data if it was added
+        // Remove "Enter" from the end
         const cleanData = scanData.replace('Enter', '').trim();
         
+        console.log('📱 Scanned Data:', cleanData);
+        console.log('   Length:', cleanData.length);
+        
+        // Validate length (8-16 digits)
         if (cleanData.length >= 8 && cleanData.length <= 16) {
-          console.log('✅ QR Code scanned:', cleanData);
+          codeDisplay.textContent = 'Processing: ' + cleanData;
           processQRCode(cleanData);
         } else {
-          console.error('❌ Invalid QR code length:', cleanData.length);
+          console.error('❌ Invalid length:', cleanData.length);
           statusDiv.textContent = 'Invalid QR code. Please try again.';
           statusDiv.style.color = 'red';
+          codeDisplay.textContent = `Error: Invalid code (${cleanData.length} chars)`;
+          
+          setTimeout(() => {
+            statusDiv.textContent = 'Ready to scan...';
+            statusDiv.style.color = '#666';
+            codeDisplay.textContent = 'Waiting for QR code...';
+          }, 3000);
         }
         
         // Reset
         scanData = '';
-        hiddenInput.value = '';
-        
-      } else if (event.key.length === 1) {
-        // Only add single characters (ignore Shift, Ctrl, etc.)
-        scanData += event.key;
-        codeDisplay.textContent = 'Scanning: ' + scanData;
+        scanInput.value = '';
+      } else {
+        // Show scanning in progress
+        codeDisplay.textContent = 'Scanning: ' + scanData.replace('Enter', '');
       }
     });
 
@@ -135,11 +158,11 @@
       try {
         statusDiv.textContent = 'Validating...';
         statusDiv.style.color = '#667eea';
-        codeDisplay.textContent = sessionCode;
 
         console.log('📤 Sending to backend:', sessionCode);
+        console.log('   URL:', `${CONFIG.backendUrl}/api/rvm/${CONFIG.deviceId}/qr/validate`);
 
-        // Send to your backend
+        // Send to backend
         const response = await fetch(
           `${CONFIG.backendUrl}/api/rvm/${CONFIG.deviceId}/qr/validate`,
           {
@@ -153,25 +176,28 @@
           }
         );
 
+        console.log('📥 Response status:', response.status);
         const data = await response.json();
+        console.log('📥 Response data:', data);
 
         if (data.success) {
           statusDiv.textContent = '✅ Welcome! Gate opening...';
           statusDiv.style.color = 'green';
-          codeDisplay.textContent = `Session: ${sessionCode}`;
+          codeDisplay.textContent = `Validated: ${sessionCode}`;
           
-          console.log('✅ Validation successful:', data);
+          console.log('✅ Validation successful');
           
-          // Show success for 2 seconds, then reset
+          // Show success for 3 seconds, then reset
           setTimeout(() => {
-            statusDiv.textContent = 'Ready to scan...';
-            statusDiv.style.color = '#666';
-            codeDisplay.textContent = 'Waiting for QR code...';
+            statusDiv.textContent = 'You can now deposit items';
+            statusDiv.style.color = '#667eea';
+            codeDisplay.textContent = 'Gate is open';
           }, 2000);
           
         } else {
           statusDiv.textContent = '❌ Invalid QR code';
           statusDiv.style.color = 'red';
+          codeDisplay.textContent = 'Validation failed';
           console.error('❌ Validation failed:', data);
           
           // Reset after 3 seconds
@@ -183,9 +209,10 @@
         }
 
       } catch (error) {
-        console.error('❌ Error processing QR:', error);
+        console.error('❌ Error:', error);
         statusDiv.textContent = '❌ Connection error';
         statusDiv.style.color = 'red';
+        codeDisplay.textContent = 'Cannot reach server';
         
         setTimeout(() => {
           statusDiv.textContent = 'Ready to scan...';
@@ -197,12 +224,12 @@
 
     // Auto-focus on load
     window.onload = () => {
-      hiddenInput.focus();
+      scanInput.focus();
       console.log('🎯 QR Scanner ready');
       console.log('📡 Backend:', CONFIG.backendUrl);
       console.log('📱 Device:', CONFIG.deviceId);
+      console.log('⚠️  Click on page if scanner not working');
     };
   </script>
 </body>
 </html>
-```
