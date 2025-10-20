@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RVM QR Scanner - Simple</title>
+  <title>RVM QR Scanner - Global Capture</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -22,25 +22,6 @@
       color: #00ff00;
       text-align: center;
     }
-    .input-box {
-      margin: 30px 0;
-    }
-    #scanInput {
-      width: 100%;
-      padding: 20px;
-      font-size: 28px;
-      background: #000;
-      border: 4px solid #00ff00;
-      color: #00ff00;
-      text-align: center;
-      box-sizing: border-box;
-      font-family: monospace;
-    }
-    #scanInput:focus {
-      outline: none;
-      border-color: #00ffff;
-      box-shadow: 0 0 20px #00ffff;
-    }
     .status {
       text-align: center;
       font-size: 24px;
@@ -49,6 +30,18 @@
       background: #000;
       border-radius: 8px;
       min-height: 60px;
+    }
+    .scan-display {
+      text-align: center;
+      font-size: 32px;
+      margin: 20px 0;
+      padding: 30px;
+      background: #000;
+      border: 4px solid #00ff00;
+      border-radius: 8px;
+      min-height: 80px;
+      color: #00ffff;
+      font-family: monospace;
     }
     .logs {
       background: #000;
@@ -79,39 +72,43 @@
       border-radius: 5px;
       margin: 5px;
     }
-    button:hover {
-      background: #00ffff;
-    }
-    .buttons {
-      text-align: center;
+    button:hover { background: #00ffff; }
+    .buttons { text-align: center; margin: 20px 0; }
+    .warning {
+      background: #ffff00;
+      color: #000;
+      padding: 15px;
+      border-radius: 5px;
       margin: 20px 0;
+      font-weight: bold;
+      text-align: center;
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🔍 RVM QR SCANNER</h1>
+    <h1>🔍 RVM QR SCANNER - GLOBAL MODE</h1>
     
-    <div class="status" id="status">
-      🎯 READY - Type code and press ENTER
+    <div class="warning">
+      ⚠️ NO NEED TO CLICK ANYTHING - Just scan QR code!
     </div>
 
-    <div class="input-box">
-      <input 
-        type="text" 
-        id="scanInput" 
-        placeholder="Type code here..." 
-        autofocus 
-      />
+    <div class="status" id="status">
+      🎯 READY - Scan QR code anywhere on screen
+    </div>
+
+    <div class="scan-display" id="scanDisplay">
+      Waiting for scan...
     </div>
 
     <div class="buttons">
-      <button onclick="testCode()">🧪 Test with 12345678</button>
+      <button onclick="testCode()">🧪 Test Manual</button>
       <button onclick="clearAll()">🗑️ Clear</button>
     </div>
 
     <div class="logs" id="logs">
-      <div class="log success">✅ Scanner ready - Type or scan QR code</div>
+      <div class="log success">✅ Global keyboard capture active</div>
+      <div class="log info">📱 Scanner will work anywhere on this page</div>
     </div>
   </div>
 
@@ -121,8 +118,12 @@
       backendUrl: 'https://rebit-api.ceewen.xyz'
     };
 
-    const input = document.getElementById('scanInput');
+    let scanBuffer = '';
+    let lastKeyTime = 0;
+    const SCAN_TIMEOUT = 100; // 100ms between keys = scanner
+
     const statusDiv = document.getElementById('status');
+    const scanDisplay = document.getElementById('scanDisplay');
     const logsDiv = document.getElementById('logs');
 
     function log(msg, type = 'info') {
@@ -139,44 +140,80 @@
       statusDiv.style.color = color;
     }
 
+    function updateDisplay(msg) {
+      scanDisplay.textContent = msg;
+    }
+
     function clearAll() {
       logsDiv.innerHTML = '';
-      input.value = '';
+      scanBuffer = '';
       updateStatus('🎯 READY');
+      updateDisplay('Waiting for scan...');
       log('Cleared', 'info');
     }
 
     function testCode() {
-      input.value = '12345678';
-      log('Test code entered: 12345678', 'info');
-      setTimeout(() => processCode('12345678'), 100);
+      log('🧪 Manual test: 12345678', 'info');
+      processCode('12345678');
     }
 
-    // Listen for Enter key
-    input.addEventListener('keypress', function(e) {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        const code = input.value.trim();
-        log(`Enter pressed - Value: "${code}"`, 'info');
+    // ===== GLOBAL KEYBOARD CAPTURE =====
+    // This captures ALL keyboard input on the page!
+    document.addEventListener('keydown', function(event) {
+      const currentTime = Date.now();
+      const timeDiff = currentTime - lastKeyTime;
+      
+      log(`⌨️ Key: "${event.key}" (${timeDiff}ms)`, 'info');
+      
+      // Reset buffer if too slow (human typing vs scanner)
+      if (timeDiff > SCAN_TIMEOUT) {
+        if (scanBuffer.length > 0) {
+          log(`⏱️ Timeout - Reset buffer`, 'info');
+        }
+        scanBuffer = '';
+      }
+      
+      lastKeyTime = currentTime;
+      
+      // Add key to buffer
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        
+        log('━━━━━━━━━━━━━━━━━━━━━', 'info');
+        log(`🎯 ENTER detected`, 'success');
+        
+        const code = scanBuffer.trim();
+        log(`📊 Buffer: "${scanBuffer}"`, 'info');
+        log(`✂️ Clean: "${code}"`, 'info');
+        log(`📏 Length: ${code.length}`, 'info');
         
         if (code.length >= 8 && code.length <= 16) {
+          log('✅ Valid!', 'success');
           processCode(code);
         } else {
-          log(`❌ Invalid length: ${code.length} (need 8-16)`, 'error');
-          updateStatus(`❌ Invalid length: ${code.length}`, '#ff0000');
+          log(`❌ Invalid length: ${code.length}`, 'error');
+          updateStatus(`❌ Invalid: ${code.length} chars`, '#ff0000');
           setTimeout(() => updateStatus('🎯 READY'), 2000);
         }
+        
+        scanBuffer = '';
+        updateDisplay('Waiting for scan...');
+        
+      } else if (event.key.length === 1) {
+        // Only add single character keys (ignore Shift, Alt, etc)
+        scanBuffer += event.key;
+        updateDisplay(`Scanning: ${scanBuffer}`);
       }
     });
 
     async function processCode(sessionCode) {
-      log('━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
       log(`🚀 Processing: ${sessionCode}`, 'success');
       updateStatus('⏳ Validating...', '#ffff00');
+      updateDisplay(`Code: ${sessionCode}`);
 
       try {
         const url = `${CONFIG.backendUrl}/api/rvm/${CONFIG.deviceId}/qr/validate`;
-        log(`📤 Sending to: ${url}`, 'info');
+        log(`📤 API: ${url}`, 'info');
 
         const response = await fetch(url, {
           method: 'POST',
@@ -185,48 +222,48 @@
         });
 
         log(`📥 Response: ${response.status}`, 'info');
-
         const data = await response.json();
-        log(`📊 Data: ${JSON.stringify(data)}`, 'info');
 
         if (response.ok && data.success) {
-          log('✅ SUCCESS - Gate opening!', 'success');
+          log('✅ SUCCESS!', 'success');
           updateStatus('✅ WELCOME! Gate opening...', '#00ff00');
+          updateDisplay('✅ VALIDATED');
           
           setTimeout(() => {
             updateStatus('🚪 Gate OPEN', '#00ffff');
-            input.value = '';
+            updateDisplay('Gate is OPEN');
           }, 2000);
         } else {
-          log(`❌ Failed: ${data.error || 'Unknown'}`, 'error');
-          updateStatus('❌ Invalid QR code', '#ff0000');
-          setTimeout(() => updateStatus('🎯 READY'), 2000);
+          log(`❌ Failed: ${data.error}`, 'error');
+          updateStatus('❌ Invalid QR', '#ff0000');
+          updateDisplay('❌ FAILED');
+          setTimeout(() => {
+            updateStatus('🎯 READY');
+            updateDisplay('Waiting for scan...');
+          }, 2000);
         }
 
       } catch (error) {
         log(`❌ ERROR: ${error.message}`, 'error');
         updateStatus('❌ Connection error', '#ff0000');
-        
-        if (error.message.includes('fetch')) {
-          log('Network error - Check backend', 'error');
-        }
-        
-        setTimeout(() => updateStatus('🎯 READY'), 3000);
+        updateDisplay('❌ ERROR');
+        setTimeout(() => {
+          updateStatus('🎯 READY');
+          updateDisplay('Waiting for scan...');
+        }, 3000);
       }
       
-      log('━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+      log('━━━━━━━━━━━━━━━━━━━━━', 'info');
     }
 
-    // Auto-focus
     window.onload = () => {
-      input.focus();
-      log('✅ Page loaded', 'success');
+      log('✅ Page loaded - GLOBAL CAPTURE ACTIVE', 'success');
       log(`Backend: ${CONFIG.backendUrl}`, 'info');
       log(`Device: ${CONFIG.deviceId}`, 'info');
+      log('', 'info');
+      log('📋 Scanner will capture anywhere on page!', 'success');
+      log('⚠️ No clicking needed - just scan!', 'info');
     };
-
-    // Keep focus
-    document.addEventListener('click', () => input.focus());
   </script>
 </body>
 </html>
