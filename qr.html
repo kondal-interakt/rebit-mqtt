@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RVM QR Scanner - DEBUG MODE</title>
+  <title>RVM QR Scanner - DEBUG</title>
   <style>
     body {
       font-family: 'Courier New', monospace;
-      margin: 20px;
+      margin: 0;
+      padding: 20px;
       background: #1e1e1e;
       color: #00ff00;
     }
@@ -29,11 +30,12 @@
     #scanInput {
       width: 100%;
       padding: 15px;
-      font-size: 20px;
+      font-size: 24px;
       background: #1e1e1e;
-      border: 2px solid #00ff00;
+      border: 3px solid #00ff00;
       color: #00ff00;
       font-family: 'Courier New', monospace;
+      box-sizing: border-box;
     }
     #scanInput:focus {
       outline: none;
@@ -45,7 +47,7 @@
       padding: 20px;
       border-radius: 10px;
       margin: 20px 0;
-      max-height: 400px;
+      max-height: 500px;
       overflow-y: auto;
       border: 2px solid #00ff00;
     }
@@ -54,6 +56,7 @@
       padding: 5px;
       border-left: 3px solid #00ff00;
       padding-left: 10px;
+      font-size: 14px;
     }
     .log-entry.error {
       color: #ff0000;
@@ -79,18 +82,18 @@
     }
     .status-display {
       background: #2a2a2a;
-      padding: 20px;
+      padding: 30px;
       border-radius: 10px;
       margin: 20px 0;
       text-align: center;
-      font-size: 24px;
+      font-size: 28px;
       font-weight: bold;
     }
     button {
       background: #00ff00;
       color: #000;
       border: none;
-      padding: 10px 20px;
+      padding: 12px 24px;
       font-size: 16px;
       font-weight: bold;
       cursor: pointer;
@@ -112,49 +115,50 @@
     
     <div class="config-section">
       <h3>⚙️ Configuration</h3>
-      <p><strong>Device ID:</strong> <span id="configDevice">RVM-3101</span></p>
-      <p><strong>Backend URL:</strong> <span id="configBackend">https://rebit-api.ceewen.xyz</span></p>
-      <p><strong>API Endpoint:</strong> <span id="configEndpoint">/api/rvm/RVM-3101/qr/validate</span></p>
+      <p><strong>Device ID:</strong> RVM-3101</p>
+      <p><strong>Backend URL:</strong> https://rebit-api.ceewen.xyz</p>
+      <p><strong>Endpoint:</strong> /api/rvm/RVM-3101/qr/validate</p>
     </div>
 
     <div class="status-display" id="statusDisplay">
-      🎯 READY - Click input field and scan QR code
+      🎯 READY - Click input and scan QR code
     </div>
 
     <div class="input-section">
-      <h3>📱 QR Scanner Input</h3>
-      <input type="text" id="scanInput" autofocus placeholder=">>> FOCUS HERE - Scanner will type here <<<" />
+      <h3>📱 QR Scanner Input Field</h3>
+      <input type="text" id="scanInput" autofocus placeholder=">>> CLICK HERE - Scanner types here <<<" />
       <p style="color: #ffff00; margin-top: 10px;">
-        ⚠️ Click on the input field above, then scan QR code
+        ⚠️ CLICK on the input field above, then scan your QR code
       </p>
-      <button onclick="testManual()">🧪 Test with Manual Input</button>
+      <button onclick="testManual()">🧪 Test Manual (12345678)</button>
       <button onclick="clearLogs()">🗑️ Clear Logs</button>
+      <button onclick="focusInput()">🎯 Focus Input</button>
     </div>
 
-    <div class="log-section" id="logSection">
-      <h3>📋 Debug Logs</h3>
+    <div class="log-section">
+      <h3>📋 Debug Logs (Real-time)</h3>
       <div id="logs"></div>
     </div>
   </div>
 
   <script>
-    // Configuration
+    // ===== CONFIGURATION =====
     const CONFIG = {
       deviceId: 'RVM-3101',
       backendUrl: 'https://rebit-api.ceewen.xyz'
     };
 
-    // State
+    // ===== STATE =====
     let scanData = '';
     let lastKeyTime = 0;
-    const scanThreshold = 50;
+    const scanThreshold = 50; // milliseconds
 
-    // Elements
+    // ===== DOM ELEMENTS =====
     const scanInput = document.getElementById('scanInput');
     const statusDisplay = document.getElementById('statusDisplay');
     const logsDiv = document.getElementById('logs');
 
-    // Logging function
+    // ===== LOGGING =====
     function log(message, type = 'info') {
       const timestamp = new Date().toLocaleTimeString();
       const entry = document.createElement('div');
@@ -174,131 +178,128 @@
       statusDisplay.style.color = color;
     }
 
-    // Keep input focused
+    function focusInput() {
+      scanInput.focus();
+      log('Input manually focused', 'info');
+    }
+
+    // ===== FOCUS MANAGEMENT =====
     document.addEventListener('click', () => {
       scanInput.focus();
-      log('Input focused', 'info');
     });
 
     scanInput.addEventListener('blur', () => {
       setTimeout(() => {
         scanInput.focus();
-        log('Input re-focused automatically', 'info');
       }, 10);
     });
 
-    // Main keyboard event listener
+    scanInput.addEventListener('focus', () => {
+      log('✅ Input field has focus', 'success');
+    });
+
+    // ===== MAIN KEYBOARD HANDLER =====
     scanInput.addEventListener('keydown', function(event) {
       const currentTime = new Date().getTime();
       
-      log(`⌨️ Key pressed: "${event.key}" (Code: ${event.keyCode})`, 'data');
+      // Log every key
+      log(`⌨️ Key: "${event.key}" (code: ${event.keyCode})`, 'data');
       
-      // Reset if typing too slow (human vs scanner)
+      // Reset if timeout
       if (currentTime - lastKeyTime > scanThreshold) {
         if (scanData !== '') {
-          log(`⏱️ Reset scan data (timeout > ${scanThreshold}ms)`, 'info');
+          log(`⏱️ Timeout - resetting scan data`, 'info');
         }
         scanData = '';
       }
       
+      // Add key to scan data
       scanData += event.key;
       lastKeyTime = currentTime;
 
-      // Show current scan data
-      updateStatus(`Scanning: ${scanData.replace('Enter', '')}`, '#ffff00');
+      // Show progress
+      const displayData = scanData.replace('Enter', '');
+      updateStatus(`📝 Scanning: ${displayData}`, '#ffff00');
 
-      // Scanner finishes with Enter
+      // Process on Enter
       if (event.key === 'Enter') {
         event.preventDefault();
         
-        log('🎯 ENTER key detected - Processing scan', 'success');
+        log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+        log('🎯 ENTER PRESSED - Processing', 'success');
         
-        // Clean the data
         const cleanData = scanData.replace('Enter', '').trim();
         
-        log(`📊 Raw scan data: "${scanData}"`, 'data');
-        log(`✂️ Cleaned data: "${cleanData}"`, 'data');
-        log(`📏 Length: ${cleanData.length} characters`, 'data');
+        log(`📊 Raw: "${scanData}"`, 'data');
+        log(`✂️ Clean: "${cleanData}"`, 'data');
+        log(`📏 Length: ${cleanData.length} chars`, 'data');
         
-        // Validate
         if (cleanData.length >= 8 && cleanData.length <= 16) {
-          log('✅ Valid QR code length', 'success');
+          log('✅ Valid length', 'success');
           processQRCode(cleanData);
         } else {
-          log(`❌ INVALID LENGTH: ${cleanData.length} (expected 8-16)`, 'error');
-          updateStatus(`❌ Invalid QR code length: ${cleanData.length}`, '#ff0000');
+          log(`❌ INVALID LENGTH: ${cleanData.length}`, 'error');
+          updateStatus(`❌ Invalid: ${cleanData.length} chars (need 8-16)`, '#ff0000');
           
           setTimeout(() => {
-            updateStatus('🎯 READY - Scan again', '#00ff00');
+            updateStatus('🎯 READY - Try again', '#00ff00');
           }, 3000);
         }
         
-        // Reset
         scanData = '';
         scanInput.value = '';
       }
     });
 
-    // Process QR code
+    // ===== QR CODE PROCESSING =====
     async function processQRCode(sessionCode) {
-      log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-      log('🚀 STARTING QR CODE PROCESSING', 'success');
-      log(`📱 Session Code: ${sessionCode}`, 'data');
+      log('🚀 PROCESSING QR CODE', 'success');
+      log(`   Session: ${sessionCode}`, 'data');
       
-      updateStatus('⏳ Validating with backend...', '#ffff00');
+      updateStatus('⏳ Validating...', '#ffff00');
 
       try {
         const url = `${CONFIG.backendUrl}/api/rvm/${CONFIG.deviceId}/qr/validate`;
         
-        log(`🌐 Preparing API call`, 'info');
+        log(`🌐 API Call`, 'info');
         log(`   URL: ${url}`, 'data');
         log(`   Method: POST`, 'data');
-        log(`   Body: { "sessionCode": "${sessionCode}" }`, 'data');
 
-        const requestBody = { sessionCode: sessionCode };
-        
-        log('📤 Sending request to backend...', 'info');
-        
         const startTime = Date.now();
+        
         const response = await fetch(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(requestBody)
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionCode: sessionCode })
         });
-        const endTime = Date.now();
         
-        log(`📥 Response received (${endTime - startTime}ms)`, 'info');
-        log(`   Status: ${response.status} ${response.statusText}`, 'data');
-        log(`   OK: ${response.ok}`, 'data');
+        const elapsed = Date.now() - startTime;
+        
+        log(`📥 Response (${elapsed}ms)`, 'info');
+        log(`   Status: ${response.status}`, 'data');
 
-        const responseText = await response.text();
-        log(`   Raw response: ${responseText}`, 'data');
+        const text = await response.text();
+        log(`   Body: ${text}`, 'data');
 
         let data;
         try {
-          data = JSON.parse(responseText);
-          log('   Parsed JSON successfully', 'success');
+          data = JSON.parse(text);
         } catch (e) {
-          log(`❌ Failed to parse JSON: ${e.message}`, 'error');
-          log(`   Response was: ${responseText}`, 'error');
-          throw new Error('Invalid JSON response');
+          log(`❌ JSON parse error: ${e.message}`, 'error');
+          throw new Error('Invalid JSON');
         }
 
         if (response.ok && data.success) {
-          log('✅ VALIDATION SUCCESSFUL!', 'success');
-          log(`   Message: ${data.message}`, 'data');
+          log('✅ SUCCESS!', 'success');
           updateStatus('✅ WELCOME! Gate opening...', '#00ff00');
           
           setTimeout(() => {
-            updateStatus('🚪 Gate open - You can deposit items', '#00ffff');
+            updateStatus('🚪 Gate OPEN - Deposit items', '#00ffff');
           }, 2000);
           
         } else {
           log('❌ VALIDATION FAILED', 'error');
-          log(`   Success: ${data.success}`, 'data');
-          log(`   Error: ${data.error || 'Unknown error'}`, 'error');
+          log(`   Error: ${data.error || 'Unknown'}`, 'error');
           updateStatus('❌ Invalid QR code', '#ff0000');
           
           setTimeout(() => {
@@ -307,72 +308,55 @@
         }
 
       } catch (error) {
-        log('❌ CONNECTION ERROR', 'error');
-        log(`   Error type: ${error.name}`, 'error');
-        log(`   Error message: ${error.message}`, 'error');
-        log(`   Stack: ${error.stack}`, 'error');
+        log('❌ ERROR', 'error');
+        log(`   Type: ${error.name}`, 'error');
+        log(`   Message: ${error.message}`, 'error');
         
-        updateStatus('❌ Cannot connect to backend', '#ff0000');
+        updateStatus('❌ Connection error', '#ff0000');
         
-        // Detailed error diagnosis
-        if (error.message.includes('Failed to fetch')) {
-          log('🔍 Diagnosis: Network error - possible causes:', 'info');
-          log('   1. Backend server is not running', 'info');
-          log('   2. CORS is blocking the request', 'info');
-          log('   3. Wrong backend URL', 'info');
-          log('   4. SSL certificate issue', 'info');
+        if (error.message.includes('fetch')) {
+          log('🔍 Network issue:', 'info');
+          log('   1. Backend not running?', 'info');
+          log('   2. CORS blocking?', 'info');
+          log('   3. Wrong URL?', 'info');
         }
         
         setTimeout(() => {
-          updateStatus('🎯 READY - Scan again', '#00ff00');
+          updateStatus('🎯 READY - Try again', '#00ff00');
         }, 5000);
       }
       
-      log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
+      log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
     }
 
-    // Manual test function
+    // ===== TEST FUNCTION =====
     function testManual() {
-      log('🧪 MANUAL TEST MODE', 'info');
-      const testCode = '12345678';
-      log(`   Using test code: ${testCode}`, 'data');
-      processQRCode(testCode);
+      log('🧪 MANUAL TEST', 'info');
+      processQRCode('12345678');
     }
 
-    // Initialize
+    // ===== INITIALIZATION =====
     window.onload = () => {
       scanInput.focus();
-      log('════════════════════════════════════', 'success');
-      log('🚀 QR SCANNER DEBUG MODE INITIALIZED', 'success');
-      log('════════════════════════════════════', 'success');
+      
+      log('═══════════════════════════════', 'success');
+      log('🚀 QR SCANNER INITIALIZED', 'success');
+      log('═══════════════════════════════', 'success');
       log(`📱 Device: ${CONFIG.deviceId}`, 'data');
       log(`🌐 Backend: ${CONFIG.backendUrl}`, 'data');
-      log(`🎯 Waiting for QR code scan...`, 'info');
       log('', 'info');
-      log('⚠️ INSTRUCTIONS:', 'info');
-      log('   1. Click on the input field', 'info');
-      log('   2. Scan QR code with hardware scanner', 'info');
-      log('   3. Watch the logs below', 'info');
+      log('📋 INSTRUCTIONS:', 'info');
+      log('   1. Click input field', 'info');
+      log('   2. Scan QR code', 'info');
+      log('   3. Watch logs', 'info');
       log('', 'info');
       
-      // Test backend connectivity
-      testBackendConnection();
+      // Test connectivity
+      log('🔍 Testing backend...', 'info');
+      fetch(CONFIG.backendUrl, { method: 'HEAD', mode: 'no-cors' })
+        .then(() => log('✅ Backend reachable', 'success'))
+        .catch(() => log('⚠️ Backend unreachable', 'error'));
     };
-
-    // Test if backend is reachable
-    async function testBackendConnection() {
-      log('🔍 Testing backend connectivity...', 'info');
-      try {
-        const response = await fetch(CONFIG.backendUrl, { 
-          method: 'HEAD',
-          mode: 'no-cors'
-        });
-        log('✅ Backend URL is reachable', 'success');
-      } catch (error) {
-        log('⚠️ Cannot reach backend URL', 'error');
-        log(`   This might cause issues when scanning`, 'error');
-      }
-    }
   </script>
 </body>
 </html>
