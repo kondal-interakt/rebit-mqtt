@@ -1,8 +1,5 @@
-// RVM Agent v11.0 - With Built-in QR Scanner
-// - Listens for QR scanner input from hardware
-// - Publishes scanned session code to backend via MQTT
-// - Backend validates and controls gate
-// Save as: agent.js
+// RVM Agent v11.1 - QR Scanner Debug Version
+// Enhanced logging to debug QR scanner issues
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -12,34 +9,31 @@ const WebSocket = require('ws');
 // ======= CONFIGURATION =======
 const CONFIG = {
   device: {
-    id: 'RVM-3101'  // Change this for different machines
+    id: 'RVM-3101'
   },
   
-  // Local Hardware API
   local: {
     baseUrl: 'http://localhost:8081',
     wsUrl: 'ws://localhost:8081/websocket/qazwsx1234',
     timeout: 10000
   },
   
-  // MQTT Configuration
   mqtt: {
     brokerUrl: 'mqtts://mqtt.ceewen.xyz:8883',
     username: 'mqttuser',
     password: 'mqttUser@2025',
     caFile: 'C:\\Users\\YY\\rebit-mqtt\\certs\\star.ceewen.xyz.ca-bundle',
     topics: {
-      commands: `rvm/RVM-3101/commands`,
-      autoControl: `rvm/RVM-3101/control/auto`,
-      cycleComplete: `rvm/RVM-3101/cycle/complete`,
-      aiResult: `rvm/RVM-3101/ai/result`,
-      weightResult: `rvm/RVM-3101/weight/result`,
-      status: `rvm/RVM-3101/status`,
-      qrScanned: `rvm/RVM-3101/qr/scanned`  // NEW: QR scanner topic
+      commands: 'rvm/RVM-3101/commands',
+      autoControl: 'rvm/RVM-3101/control/auto',
+      cycleComplete: 'rvm/RVM-3101/cycle/complete',
+      aiResult: 'rvm/RVM-3101/ai/result',
+      weightResult: 'rvm/RVM-3101/weight/result',
+      status: 'rvm/RVM-3101/status',
+      qrScanned: 'rvm/RVM-3101/qr/scanned'
     }
   },
   
-  // Motor Configuration
   motors: {
     gate: { motorId: "01" },
     belt: { motorId: "02" },
@@ -47,14 +41,12 @@ const CONFIG = {
     stepper: { moduleId: '09' }
   },
   
-  // Detection Thresholds
   detection: {
     METAL_CAN: 0.22,
     PLASTIC_BOTTLE: 0.30,
     GLASS: 0.25
   },
   
-  // Timing (milliseconds)
   timing: {
     beltToWeight: 3000,
     beltToStepper: 4000,
@@ -66,7 +58,6 @@ const CONFIG = {
     gateOperation: 1000
   },
   
-  // Weight Calibration
   weight: {
     coefficients: { 1: 988, 2: 942, 3: 942, 4: 942 }
   }
@@ -83,7 +74,7 @@ const state = {
   ws: null,
   sessionId: null,
   gateOpen: false,
-  waitingForQR: false  // NEW: Track if waiting for QR scan
+  waitingForQR: false
 };
 
 // ======= UTILITY =======
@@ -221,38 +212,32 @@ async function executeAutoCycle() {
   console.log('========================================\n');
   
   try {
-    // Step 1: Belt to weight position
     console.log('▶️  Moving to weight position...');
     await executeCommand('customMotor', { motorId: "02", type: "02" });
     await delay(CONFIG.timing.beltToWeight);
     await executeCommand('customMotor', { motorId: "02", type: "00" });
     
-    // Step 2: Belt to stepper position
     console.log('▶️  Moving to stepper position...');
     await executeCommand('customMotor', { motorId: "02", type: "03" });
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', { motorId: "02", type: "00" });
     await delay(CONFIG.timing.positionSettle);
     
-    // Step 3: Stepper dump
     console.log('▶️  Dumping to crusher...');
     const position = state.aiResult.materialType === 'METAL_CAN' ? '02' : '03';
     await executeCommand('stepperMotor', { position });
     await delay(CONFIG.timing.stepperRotate);
     
-    // Step 4: Compactor
     console.log('▶️  Crushing...');
     await executeCommand('customMotor', { motorId: "04", type: "01" });
     await delay(CONFIG.timing.compactor);
     await executeCommand('customMotor', { motorId: "04", type: "00" });
     
-    // Step 5: Belt return
     console.log('▶️  Returning belt...');
     await executeCommand('customMotor', { motorId: "02", type: "01" });
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', { motorId: "02", type: "00" });
     
-    // Step 6: Stepper reset
     console.log('▶️  Resetting stepper...');
     await executeCommand('stepperMotor', { position: '01' });
     await delay(CONFIG.timing.stepperReset);
@@ -264,7 +249,6 @@ async function executeAutoCycle() {
     console.log(`⏱️  Duration: ${cycleTime} seconds`);
     console.log('========================================\n');
     
-    // Publish complete transaction data to backend
     const transactionData = {
       sessionId: state.sessionId,
       deviceId: CONFIG.device.id,
@@ -287,7 +271,6 @@ async function executeAutoCycle() {
     
     console.log('📤 Transaction published to backend');
     
-    // Reset state for next item
     state.cycleInProgress = false;
     state.aiResult = null;
     state.weight = null;
@@ -298,7 +281,6 @@ async function executeAutoCycle() {
     console.error('❌ CYCLE FAILED:', error.message);
     console.error('========================================\n');
     
-    // Publish failure
     mqttClient.publish(
       CONFIG.mqtt.topics.cycleComplete,
       JSON.stringify({
@@ -311,7 +293,6 @@ async function executeAutoCycle() {
       { qos: 1 }
     );
     
-    // Emergency stop
     console.log('🛑 Emergency stop...');
     try {
       await executeCommand('customMotor', { motorId: "02", type: "00" });
@@ -346,12 +327,20 @@ function connectWebSocket() {
   
   state.ws.on('open', () => {
     console.log('✅ WebSocket connected');
+    console.log('🎯 Ready to receive QR codes');
     setTimeout(() => requestModuleId(), 1000);
   });
   
   state.ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
+      
+      // ===== DEBUG: Log ALL messages =====
+      console.log('📨 WebSocket RAW message:', JSON.stringify(message, null, 2));
+      console.log('   Function:', message.function);
+      console.log('   Data:', message.data);
+      console.log('   Data type:', typeof message.data);
+      // ==================================
       
       // Module ID response
       if (message.function === '01') {
@@ -360,28 +349,55 @@ function connectWebSocket() {
         return;
       }
       
-      // ===== NEW: QR SCANNER INPUT =====
-      // Hardware QR scanner sends scanned code via WebSocket
-      if (message.function === 'qrcode') {
-        const sessionCode = message.data;  // 8-16 digit code from QR
-        console.log(`📱 QR Code scanned: ${sessionCode}`);
+      // ===== QR SCANNER INPUT =====
+      if (message.function === 'qrcode' || message.function === 'qrCode' || message.function === 'QRCode') {
+        console.log('\n========================================');
+        console.log('📱 QR CODE DETECTED!');
+        console.log('========================================');
         
-        // Publish to MQTT so backend can validate
+        const sessionCode = message.data || message.code || message.qrCode;
+        console.log('   Session Code:', sessionCode);
+        console.log('   Code Length:', sessionCode ? sessionCode.length : 0);
+        console.log('   Code Type:', typeof sessionCode);
+        
+        if (!sessionCode || sessionCode.length < 8 || sessionCode.length > 16) {
+          console.error('❌ Invalid session code format');
+          console.log('   Expected: 8-16 digit string');
+          console.log('   Received:', sessionCode);
+          return;
+        }
+        
+        console.log('✅ Valid session code format');
+        console.log('📤 Publishing to MQTT...');
+        
+        // Publish to MQTT
+        const mqttPayload = {
+          deviceId: CONFIG.device.id,
+          sessionCode: String(sessionCode).trim(),
+          timestamp: new Date().toISOString()
+        };
+        
+        console.log('   Topic:', CONFIG.mqtt.topics.qrScanned);
+        console.log('   Payload:', JSON.stringify(mqttPayload, null, 2));
+        
         mqttClient.publish(
           CONFIG.mqtt.topics.qrScanned,
-          JSON.stringify({
-            deviceId: CONFIG.device.id,
-            sessionCode: sessionCode,
-            timestamp: new Date().toISOString()
-          }),
-          { qos: 1 }
+          JSON.stringify(mqttPayload),
+          { qos: 1 },
+          (err) => {
+            if (err) {
+              console.error('❌ MQTT publish failed:', err);
+            } else {
+              console.log('✅ QR code published to MQTT successfully');
+            }
+          }
         );
         
-        console.log('📤 QR code sent to backend for validation');
+        console.log('========================================\n');
         state.waitingForQR = false;
         return;
       }
-      // =====================================
+      // =============================
       
       // AI Photo result
       if (message.function === 'aiPhoto') {
@@ -398,14 +414,12 @@ function connectWebSocket() {
         
         console.log(`🤖 AI: ${state.aiResult.materialType} (${state.aiResult.matchRate}%)`);
         
-        // Publish AI result
         mqttClient.publish(
           CONFIG.mqtt.topics.aiResult,
           JSON.stringify(state.aiResult),
           { qos: 1 }
         );
         
-        // Check if should proceed
         if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
           const threshold = CONFIG.detection[state.aiResult.materialType];
           const thresholdPercent = Math.round(threshold * 100);
@@ -435,14 +449,12 @@ function connectWebSocket() {
         
         console.log(`⚖️  Weight: ${state.weight.weight}g`);
         
-        // Publish weight result
         mqttClient.publish(
           CONFIG.mqtt.topics.weightResult,
           JSON.stringify(state.weight),
           { qos: 1 }
         );
         
-        // Calibrate if needed
         if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
           state.calibrationAttempts++;
           console.log(`⚠️  Calibrating weight (${state.calibrationAttempts}/2)...`);
@@ -455,7 +467,6 @@ function connectWebSocket() {
         
         if (state.weight.weight > 0) state.calibrationAttempts = 0;
         
-        // Start cycle if ready
         if (state.autoCycleEnabled && 
             state.aiResult && 
             state.weight.weight > 1 && 
@@ -467,11 +478,10 @@ function connectWebSocket() {
         return;
       }
       
-      // Object detection - only trigger if gate is open
+      // Object detection
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         
-        // Code 4 = infrared body sensor detected object
         if (code === 4 && 
             state.autoCycleEnabled && 
             !state.cycleInProgress &&
@@ -483,7 +493,8 @@ function connectWebSocket() {
       }
       
     } catch (error) {
-      console.error('❌ WebSocket error:', error.message);
+      console.error('❌ WebSocket message error:', error.message);
+      console.error('   Raw data:', data);
     }
   });
   
@@ -507,11 +518,11 @@ const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
 
 mqttClient.on('connect', () => {
   console.log('✅ MQTT connected');
+  console.log('📡 Publishing to topic:', CONFIG.mqtt.topics.qrScanned);
   
   mqttClient.subscribe(CONFIG.mqtt.topics.commands);
   mqttClient.subscribe(CONFIG.mqtt.topics.autoControl);
   
-  // Publish online status
   mqttClient.publish(
     CONFIG.mqtt.topics.status,
     JSON.stringify({
@@ -533,12 +544,10 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
-    // Auto mode control from backend
     if (topic === CONFIG.mqtt.topics.autoControl) {
       state.autoCycleEnabled = payload.enabled === true;
       console.log(`🤖 Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
       
-      // Open or close gate based on auto mode
       if (state.autoCycleEnabled && state.moduleId) {
         await executeCommand('openGate');
         console.log('🚪 Gate opened (auto mode enabled)');
@@ -547,7 +556,6 @@ mqttClient.on('message', async (topic, message) => {
         console.log('🚪 Gate closed (auto mode disabled)');
       }
       
-      // Publish status update
       mqttClient.publish(
         CONFIG.mqtt.topics.status,
         JSON.stringify({
@@ -563,7 +571,6 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
-    // Manual commands from backend
     if (topic === CONFIG.mqtt.topics.commands) {
       console.log(`📩 Command: ${payload.action}`);
       
@@ -608,14 +615,12 @@ process.on('SIGINT', () => {
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v11.0 - WITH QR SCANNER');
+console.log('🚀 RVM AGENT v11.1 - QR DEBUG MODE');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log('========================================');
-console.log('📡 MQTT Topics:');
-console.log(`   Commands: ${CONFIG.mqtt.topics.commands}`);
-console.log(`   Auto Control: ${CONFIG.mqtt.topics.autoControl}`);
-console.log(`   Cycle Complete: ${CONFIG.mqtt.topics.cycleComplete}`);
-console.log(`   QR Scanned: ${CONFIG.mqtt.topics.qrScanned}`);
+console.log('📡 MQTT QR Topic:', CONFIG.mqtt.topics.qrScanned);
+console.log('🔍 QR Debug Mode: ENABLED');
+console.log('   Will show detailed logs for QR scanning');
 console.log('========================================');
 console.log('🎯 Detection Thresholds:');
 console.log(`   Metal: ${CONFIG.detection.METAL_CAN * 100}%`);
