@@ -1,86 +1,208 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <title>RVM QR Code Scanner</title>
-    <style>
-        body { font-family: monospace; padding: 20px; background: #f0f0f0; }
-        #scanInput { width: 100%; padding: 10px; font-size: 16px; }
-        #status { color: green; margin: 10px 0; }
-        #lastScan { color: blue; margin: 10px 0; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RVM QR Scanner</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    .container {
+      text-align: center;
+      background: white;
+      padding: 40px;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+    h1 {
+      color: #667eea;
+      margin-bottom: 20px;
+    }
+    .scanner-icon {
+      font-size: 80px;
+      margin: 20px 0;
+    }
+    .status {
+      font-size: 18px;
+      color: #666;
+      margin: 20px 0;
+    }
+    .code-display {
+      font-size: 24px;
+      font-weight: bold;
+      color: #667eea;
+      padding: 20px;
+      background: #f5f5f5;
+      border-radius: 10px;
+      min-height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* Hidden input to capture keyboard */
+    #hiddenInput {
+      position: absolute;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+    }
+  </style>
 </head>
 <body>
-    <h2>RVM QR Code Scanner Active</h2>
-    <input autofocus type="text" id="scanInput" placeholder="Focus here and scan QR with RVM scanner...">
-    <p id="status">Connecting to WebSocket...</p>
-    <p id="lastScan">Last scanned: None</p>
+  <!-- Hidden input that captures keyboard from QR scanner -->
+  <input type="text" id="hiddenInput" autofocus />
 
-    <script>
-        let ws;
-        let scanData = '';
-        let lastKeyTime = 0;
-        const scanThreshold = 50; // ms threshold to detect new scan vs. typing
+  <div class="container">
+    <h1>Scan Your QR Code</h1>
+    <div class="scanner-icon">📱</div>
+    <div class="status" id="status">Ready to scan...</div>
+    <div class="code-display" id="codeDisplay">Waiting for QR code...</div>
+  </div>
 
-        // Connect to middle tier WebSocket
-        ws = new WebSocket('ws://localhost:8081/websocket/qazwsx1234');
+  <script>
+    // Configuration
+    const CONFIG = {
+      deviceId: 'RVM-3101',
+      backendUrl: 'https://rebit-api.ceewen.xyz'  // Your backend URL
+    };
 
-        ws.onopen = function() {
-            document.getElementById('status').innerText = '✅ Connected - Focus input and scan QR';
-            console.log('WS Connected');
-        };
+    let scanData = '';
+    let lastKeyTime = 0;
+    const scanThreshold = 50; // Scanner types fast (within 50ms between keys)
 
-        ws.onmessage = function(e) {
-            console.log('Received from middle tier:', e.data);
-            // Optional: Handle any responses (e.g., ack)
-        };
+    // Keep focus on hidden input
+    const hiddenInput = document.getElementById('hiddenInput');
+    const statusDiv = document.getElementById('status');
+    const codeDisplay = document.getElementById('codeDisplay');
 
-        ws.onclose = function() {
-            document.getElementById('status').innerText = '⚠️ WS Closed - Reconnecting...';
-            console.log('WS Closed');
-            setTimeout(() => location.reload(), 3000);
-        };
+    // Keep input focused at all times
+    document.addEventListener('click', () => {
+      hiddenInput.focus();
+    });
 
-        ws.onerror = function(evt) {
-            document.getElementById('status').innerText = '❌ WS Error: ' + (evt.message || 'Unknown');
-            console.error('WS Error:', evt);
-        };
+    // Prevent input from losing focus
+    hiddenInput.addEventListener('blur', () => {
+      setTimeout(() => hiddenInput.focus(), 10);
+    });
 
-        // Monitor keyboard for scanner input (HID mode)
-        document.getElementById('scanInput').addEventListener('keydown', function(event) {
-            const currentTime = new Date().getTime();
-            if (currentTime - lastKeyTime > scanThreshold) {
-                scanData = ''; // New scan detected
-            }
-            scanData += event.key;
-            lastKeyTime = currentTime;
+    // Listen for keyboard events from QR scanner
+    hiddenInput.addEventListener('keydown', function(event) {
+      const currentTime = new Date().getTime();
+      
+      // If too much time passed, reset (human typing vs scanner)
+      if (currentTime - lastKeyTime > scanThreshold) {
+        scanData = '';
+      }
+      
+      lastKeyTime = currentTime;
 
-            if (event.key === 'Enter') {
-                console.log('Scanned Data:', scanData);
-                
-                // Validate: 8-16 digits (as per typical user IDs)
-                if (scanData.length >= 8 && scanData.length <= 16 && /^\d+$/.test(scanData)) {
-                    // Send to middle tier as JSON (matches doc format)
-                    const qrMessage = { function: 'qrcode', data: scanData };
-                    ws.send(JSON.stringify(qrMessage));
-                    
-                    document.getElementById('lastScan').innerText = `Last scanned & sent: ${scanData}`;
-                    document.getElementById('status').innerText = '✅ QR Sent to RVM - Ready for next';
-                    console.log('QR Sent to Middle Tier:', qrMessage);
-                } else {
-                    document.getElementById('status').innerText = `⚠️ Invalid QR: "${scanData}" (8-16 digits only)`;
-                    console.warn('Invalid QR:', scanData);
-                }
-                
-                scanData = ''; // Reset
-                event.preventDefault(); // Prevent default Enter behavior
-            }
-        });
+      // QR scanner sends Enter key at the end
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        
+        // Remove "Enter" from the data if it was added
+        const cleanData = scanData.replace('Enter', '').trim();
+        
+        if (cleanData.length >= 8 && cleanData.length <= 16) {
+          console.log('✅ QR Code scanned:', cleanData);
+          processQRCode(cleanData);
+        } else {
+          console.error('❌ Invalid QR code length:', cleanData.length);
+          statusDiv.textContent = 'Invalid QR code. Please try again.';
+          statusDiv.style.color = 'red';
+        }
+        
+        // Reset
+        scanData = '';
+        hiddenInput.value = '';
+        
+      } else if (event.key.length === 1) {
+        // Only add single characters (ignore Shift, Ctrl, etc.)
+        scanData += event.key;
+        codeDisplay.textContent = 'Scanning: ' + scanData;
+      }
+    });
 
-        // Cleanup
-        window.onbeforeunload = function() { if (ws) ws.close(); };
-    </script>
+    // Process the scanned QR code
+    async function processQRCode(sessionCode) {
+      try {
+        statusDiv.textContent = 'Validating...';
+        statusDiv.style.color = '#667eea';
+        codeDisplay.textContent = sessionCode;
+
+        console.log('📤 Sending to backend:', sessionCode);
+
+        // Send to your backend
+        const response = await fetch(
+          `${CONFIG.backendUrl}/api/rvm/${CONFIG.deviceId}/qr/validate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              sessionCode: sessionCode
+            })
+          }
+        );
+
+        const data = await response.json();
+
+        if (data.success) {
+          statusDiv.textContent = '✅ Welcome! Gate opening...';
+          statusDiv.style.color = 'green';
+          codeDisplay.textContent = `Session: ${sessionCode}`;
+          
+          console.log('✅ Validation successful:', data);
+          
+          // Show success for 2 seconds, then reset
+          setTimeout(() => {
+            statusDiv.textContent = 'Ready to scan...';
+            statusDiv.style.color = '#666';
+            codeDisplay.textContent = 'Waiting for QR code...';
+          }, 2000);
+          
+        } else {
+          statusDiv.textContent = '❌ Invalid QR code';
+          statusDiv.style.color = 'red';
+          console.error('❌ Validation failed:', data);
+          
+          // Reset after 3 seconds
+          setTimeout(() => {
+            statusDiv.textContent = 'Ready to scan...';
+            statusDiv.style.color = '#666';
+            codeDisplay.textContent = 'Waiting for QR code...';
+          }, 3000);
+        }
+
+      } catch (error) {
+        console.error('❌ Error processing QR:', error);
+        statusDiv.textContent = '❌ Connection error';
+        statusDiv.style.color = 'red';
+        
+        setTimeout(() => {
+          statusDiv.textContent = 'Ready to scan...';
+          statusDiv.style.color = '#666';
+          codeDisplay.textContent = 'Waiting for QR code...';
+        }, 3000);
+      }
+    }
+
+    // Auto-focus on load
+    window.onload = () => {
+      hiddenInput.focus();
+      console.log('🎯 QR Scanner ready');
+      console.log('📡 Backend:', CONFIG.backendUrl);
+      console.log('📱 Device:', CONFIG.deviceId);
+    };
+  </script>
 </body>
 </html>
+```
