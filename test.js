@@ -1,5 +1,5 @@
-// RVM Agent v9.0 - FULLY AUTOMATED WITH QR & BACKEND VALIDATION - COMPLETE FIXED CODE
-// Save as: agent-v9.0-complete-fixed.js
+// RVM Agent v9.0 - FULLY AUTOMATED WITH QR & BACKEND VALIDATION - COMPLETE CODE
+// Save as: agent-v9.0-complete-auto.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -714,7 +714,7 @@ async function emergencyStop() {
   }
 }
 
-// ======= WEBSOCKET HANDLER - FIXED VERSION =======
+// ======= WEBSOCKET HANDLER =======
 function connectWebSocket() {
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
@@ -752,13 +752,13 @@ function connectWebSocket() {
         // Publish AI result
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
         
-        // FIXED: Use same logic as working v8.0 code
-        if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
+        // If valid material detected and waiting for object, proceed to weight
+        if (state.waitingForObject && state.aiResult.materialType !== 'UNKNOWN') {
           const threshold = CONFIG.detection[state.aiResult.materialType];
           const thresholdPercent = Math.round(threshold * 100);
           
           if (state.aiResult.matchRate >= thresholdPercent) {
-            console.log('✅ Proceeding to weight...');
+            console.log('✅ Object detected - proceeding to weight...');
             setTimeout(() => executeCommand('getWeight'), 500);
           } else {
             console.log(`⚠️ Confidence too low (${state.aiResult.matchRate}% < ${thresholdPercent}%)`);
@@ -798,18 +798,17 @@ function connectWebSocket() {
         
         if (state.weight.weight > 0) state.calibrationAttempts = 0;
         
-        // FIXED: Use same logic as working v8.0 code
-        if (state.autoCycleEnabled && state.aiResult && state.weight.weight > 1 && !state.cycleInProgress) {
-          state.cycleInProgress = true;
+        // Start cycle if ready
+        if (state.waitingForObject && state.aiResult && state.weight.weight > 1 && !state.cycleInProgress) {
           setTimeout(() => executeAutoCycle(), 1000);
         }
         return;
       }
       
-      // Object detection - FIXED: Use same logic as working v8.0 code
+      // Object detection (infrared sensor)
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
-        if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
+        if (code === 4 && state.waitingForObject && !state.cycleInProgress) {
           console.log('👤 Object detected by sensor - taking photo...');
           setTimeout(() => executeCommand('takePhoto'), 1000);
         }
@@ -870,34 +869,6 @@ mqttClient.on('message', async (topic, message) => {
     
     if (topic === CONFIG.mqtt.topics.commands) {
       console.log(`📩 Command: ${payload.action}`);
-      
-      // Manual camera capture for testing
-      if (payload.action === 'takePhoto' && state.moduleId) {
-        console.log('📸 Manual photo capture...');
-        await executeCommand('takePhoto');
-        return;
-      }
-      
-      // Manual material override
-      if (payload.action === 'setMaterial') {
-        const validMaterials = ['METAL_CAN', 'PLASTIC_BOTTLE', 'GLASS'];
-        if (validMaterials.includes(payload.materialType)) {
-          state.aiResult = {
-            matchRate: 100,
-            materialType: payload.materialType,
-            className: 'MANUAL_OVERRIDE',
-            taskId: 'manual_' + Date.now(),
-            timestamp: new Date().toISOString()
-          };
-          console.log(`🔧 Manual override: ${payload.materialType}`);
-          
-          if (state.autoCycleEnabled) {
-            setTimeout(() => executeCommand('getWeight'), 500);
-          }
-        }
-        return;
-      }
-      
       if (state.moduleId) {
         await executeCommand(payload.action, payload.params);
       }
