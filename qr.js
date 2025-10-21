@@ -1,4 +1,4 @@
-// RVM Agent v9.5 - PERMANENT QR SCANNER - COMPLETE CODE
+// RVM Agent v9.5 - PERMANENT QR SCANNER - COMPLETE CODE (Fixed Buffer Concatenation)
 // Save as: agent-v9.5-complete.js
 
 const mqtt = require('mqtt');
@@ -49,7 +49,8 @@ const CONFIG = {
     minLength: 8,
     maxLength: 20,
     numericOnly: true,
-    scanDelay: 1000
+    scanDelay: 500,  // Reduced for faster processing, less rescan window
+    pauseThreshold: 300  // ms: Pause between inputs = new scan
   },
   
   // Motor Configuration
@@ -114,7 +115,8 @@ const state = {
   qrScanTimer: null,
   autoPhotoTimer: null,
   qrBuffer: '',
-  isProcessingQR: false
+  isProcessingQR: false,
+  lastInputTime: null  // New: For pause detection
 };
 
 // ======= UTILITY =======
@@ -178,6 +180,11 @@ function setupQRScanner() {
   console.log('🎯 Scan QR code - No Enter key required!');
   console.log('🔄 Scanner stays active FOREVER');
   console.log('========================================\n');
+
+  // Reset for init
+  state.qrBuffer = '';
+  state.lastInputTime = null;
+  state.qrScanTimer = null;
 
   // Method 1: Raw mode for immediate character reading
   setupRawModeScanner();
@@ -249,10 +256,34 @@ function handleQRInput(input) {
   
   if (newData.length === 0) return;
   
+  const now = Date.now();
+  
+  // NEW: Pause detection - If significant pause, process pending buffer as complete scan
+  if (state.qrBuffer.length > 0 && 
+      state.lastInputTime !== null && 
+      (now - state.lastInputTime) > CONFIG.qr.pauseThreshold) {
+    
+    console.log(`⏸️  Pause detected (${now - state.lastInputTime}ms) - Processing pending: "${state.qrBuffer}"`);
+    
+    if (state.qrScanTimer) {
+      clearTimeout(state.qrScanTimer);
+      state.qrScanTimer = null;
+    }
+    
+    // Process immediately if it meets min length
+    if (state.qrBuffer.length >= CONFIG.qr.minLength) {
+      processCompleteQR(state.qrBuffer);
+    }
+    state.qrBuffer = '';  // Clear for new scan
+  }
+  
   // Add to buffer
   state.qrBuffer += newData;
   
-  // Reset timer
+  // Update last input time
+  state.lastInputTime = now;
+  
+  // Reset/set timer for end-of-burst detection
   if (state.qrScanTimer) {
     clearTimeout(state.qrScanTimer);
   }
@@ -260,6 +291,7 @@ function handleQRInput(input) {
   // Check if we have enough characters
   if (state.qrBuffer.length >= CONFIG.qr.minLength) {
     state.qrScanTimer = setTimeout(() => {
+      console.log(`⏱️  Burst complete - Processing: "${state.qrBuffer}"`);
       processCompleteQR(state.qrBuffer);
       state.qrBuffer = ''; // Reset buffer
     }, CONFIG.qr.scanDelay);
@@ -286,6 +318,13 @@ function processCompleteQR(qrData) {
   } else if (qrCode.length > 0) {
     console.log(`❌ Invalid QR format: "${qrCode}" (Length: ${qrCode.length})`);
     console.log(`   Expected: ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} characters`);
+    console.log(`   Tip: Rescan slowly - avoid waving multiple times quickly.`);
+  }
+  
+  // Always clear timer after process
+  if (state.qrScanTimer) {
+    clearTimeout(state.qrScanTimer);
+    state.qrScanTimer = null;
   }
 }
 
@@ -490,6 +529,8 @@ async function resetSession() {
   state.currentUserId = null;
   state.currentUserData = null;
   state.sessionId = null;
+  state.qrBuffer = '';  // Ensure buffer clear
+  state.lastInputTime = null;
   
   // Publish idle status
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
@@ -915,14 +956,15 @@ process.on('SIGINT', gracefulShutdown);
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v9.5 - PERMANENT QR');
-console.log('🔄 SCANNER NEVER STOPS WORKING!');
+console.log('🚀 RVM AGENT v9.5 - PERMANENT QR (Fixed Buffer)');
+console.log('🔄 SCANNER NEVER STOPS + ANTI-CONCAT!');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('========================================');
 console.log('🎯 FEATURES:');
 console.log('   ✅ Permanent QR scanning');
+console.log('   ✅ Pause detection (no more concat on rescan)');
 console.log('   ✅ Auto photo after 5 seconds');
 console.log('   ✅ Multiple scanner methods');
 console.log('   ✅ Automatic recovery on errors');
