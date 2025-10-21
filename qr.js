@@ -1,6 +1,6 @@
 // ============================================================
-// RVM AGENT v10.0 - PRODUCTION GRADE
-// Market Standard Implementation
+// RVM AGENT v10.1 - PRODUCTION (FULLY DEBUGGED & FIXED)
+// Market Standard Implementation with Complete Error Handling
 // ============================================================
 
 const mqtt = require('mqtt');
@@ -15,7 +15,7 @@ const EventEmitter = require('events');
 const CONFIG = {
   device: {
     id: 'RVM-3101',
-    version: '10.0.0',
+    version: '10.1.0',
     environment: process.env.NODE_ENV || 'production'
   },
   
@@ -56,7 +56,7 @@ const CONFIG = {
     maxLength: 20,
     numericOnly: true,
     scanTimeout: 100,        // Time between characters from scanner
-    processDelay: 50,        // Debounce delay after last character
+    processDelay: 200,       // Auto-process delay after last character
     validationTimeout: 5000  // Backend validation timeout
   },
   
@@ -257,7 +257,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const generateSessionId = () => `${CONFIG.device.id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
 // ============================================================
-// QR SCANNER - PRODUCTION GRADE
+// QR SCANNER - PRODUCTION GRADE (FIXED)
 // ============================================================
 class QRScanner extends EventEmitter {
   constructor() {
@@ -272,7 +272,8 @@ class QRScanner extends EventEmitter {
     logger.box('QR SCANNER INITIALIZED', [
       '📱 Mode: HID Keyboard Scanner',
       `📏 Length: ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} chars`,
-      `⚡ Timeout: ${CONFIG.qr.scanTimeout}ms between chars`,
+      `⚡ Auto-detects Enter key OR timeout`,
+      `⏱️  Process delay: ${CONFIG.qr.processDelay}ms`,
       '🎯 Ready to scan'
     ]);
 
@@ -305,14 +306,18 @@ class QRScanner extends EventEmitter {
 
     // Check for Enter key (end of scan)
     if (data.includes('\r') || data.includes('\n')) {
+      logger.info('✅ Enter key detected');
       this.processScan();
       return;
     }
 
     // Reset buffer if timeout exceeded (new scan)
     if (now - this.lastCharTime > CONFIG.qr.scanTimeout) {
+      if (this.buffer.length > 0) {
+        logger.info('⏰ Timeout - processing previous scan');
+        this.processScan();
+      }
       this.buffer = '';
-      logger.debug('QR buffer reset - new scan detected');
     }
 
     // Add characters to buffer
@@ -322,13 +327,27 @@ class QRScanner extends EventEmitter {
       this.lastCharTime = now;
 
       // Show real-time progress
-      if (this.buffer.length <= 5) {
-        process.stdout.write(`\r📥 Scanning: ${this.buffer}...`);
+      process.stdout.write(`\r📥 Scanning: ${this.buffer}... (${this.buffer.length} chars)`);
+
+      // Auto-process after reaching max length
+      if (this.buffer.length >= CONFIG.qr.maxLength) {
+        console.log(''); // New line
+        logger.info('📏 Max length reached - processing');
+        this.processScan();
+        return;
       }
 
-      // Auto-process if Enter key not detected
+      // Auto-process timer (for scanners without Enter key)
       if (this.scanTimer) clearTimeout(this.scanTimer);
-      this.scanTimer = setTimeout(() => this.processScan(), CONFIG.qr.processDelay);
+      
+      // Only auto-process if we have enough characters
+      if (this.buffer.length >= CONFIG.qr.minLength) {
+        this.scanTimer = setTimeout(() => {
+          console.log(''); // New line
+          logger.info('⏰ Auto-processing (no Enter key detected)');
+          this.processScan();
+        }, CONFIG.qr.processDelay);
+      }
     }
   }
 
@@ -341,10 +360,13 @@ class QRScanner extends EventEmitter {
     const code = this.buffer.trim();
     this.buffer = '';
 
-    if (code.length === 0) return;
+    if (code.length === 0) {
+      logger.debug('Empty buffer - ignoring');
+      return;
+    }
 
     console.log(''); // New line after progress
-    logger.info(`QR Scanned: "${code}" (${code.length} chars)`);
+    logger.info(`📱 QR Scanned: "${code}" (${code.length} chars)`);
 
     // Validate format
     if (!this.validateFormat(code)) {
@@ -352,24 +374,27 @@ class QRScanner extends EventEmitter {
     }
 
     // Emit scan event
+    logger.info('🔔 Emitting scan event...');
     this.emit('scan', code);
   }
 
   validateFormat(code) {
     if (code.length < CONFIG.qr.minLength || code.length > CONFIG.qr.maxLength) {
-      logger.warn(`Invalid QR length: ${code.length} (expected ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength})`);
+      logger.warn(`❌ Invalid QR length: ${code.length} (expected ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength})`);
       return false;
     }
 
     if (CONFIG.qr.numericOnly && !/^\d+$/.test(code)) {
-      logger.warn('Invalid QR format: must be numeric');
+      logger.warn('❌ Invalid QR format: must be numeric');
       return false;
     }
 
+    logger.success('✅ QR format valid');
     return true;
   }
 
   reset() {
+    logger.debug('Resetting QR scanner buffer');
     this.buffer = '';
     if (this.scanTimer) {
       clearTimeout(this.scanTimer);
@@ -391,40 +416,72 @@ class BackendClient {
   }
 
   async validateQR(sessionCode) {
-    logger.info('Validating QR with backend...');
+    logger.info('═══════════════════════════════════════');
+    logger.info('🔐 BACKEND QR VALIDATION STARTED');
+    logger.info('═══════════════════════════════════════');
+    logger.info(`URL: ${CONFIG.backend.url}${CONFIG.backend.validateEndpoint}`);
+    logger.info(`Session Code: ${sessionCode}`);
+    logger.info('═══════════════════════════════════════');
 
     for (let attempt = 1; attempt <= CONFIG.backend.retries; attempt++) {
       try {
+        logger.info(`📡 Attempt ${attempt}/${CONFIG.backend.retries} - Sending POST request...`);
+        
         const response = await this.axios.post(
           CONFIG.backend.validateEndpoint,
           { sessionCode }
         );
 
+        logger.info(`✅ Response received - Status: ${response.status}`);
+        logger.info(`Response data: ${JSON.stringify(response.data, null, 2)}`);
+
         if (response.data && response.data.success) {
-          logger.success('QR validation successful');
+          logger.success('✅ QR VALIDATION SUCCESSFUL!');
+          logger.info(`User: ${response.data.user?.name || 'N/A'}`);
+          logger.info(`Email: ${response.data.user?.email || 'N/A'}`);
+          logger.info('═══════════════════════════════════════\n');
+          
           return {
             valid: true,
             user: response.data.user || {},
             data: response.data
           };
         } else {
-          logger.warn(`QR validation failed: ${response.data?.error || 'Unknown error'}`);
+          logger.warn(`❌ Validation failed: ${response.data?.error || 'Unknown error'}`);
+          logger.info('═══════════════════════════════════════\n');
+          
           return {
             valid: false,
             error: response.data?.error || 'Invalid QR code'
           };
         }
       } catch (error) {
-        logger.error(`Validation attempt ${attempt}/${CONFIG.backend.retries} failed: ${error.message}`);
+        logger.error(`❌ Attempt ${attempt}/${CONFIG.backend.retries} FAILED`);
+        logger.error(`Error message: ${error.message}`);
+        
+        if (error.response) {
+          logger.error(`Response status: ${error.response.status}`);
+          logger.error(`Response data: ${JSON.stringify(error.response.data, null, 2)}`);
+        } else if (error.request) {
+          logger.error('No response received from server');
+          logger.error('Possible network issue or server is down');
+        } else {
+          logger.error(`Request setup error: ${error.message}`);
+        }
         
         if (attempt === CONFIG.backend.retries) {
+          logger.error('❌ ALL RETRY ATTEMPTS EXHAUSTED');
+          logger.info('═══════════════════════════════════════\n');
+          
           return {
             valid: false,
             error: error.response?.data?.error || error.message
           };
         }
         
-        await delay(1000 * attempt);
+        const waitTime = 1000 * attempt;
+        logger.info(`⏳ Waiting ${waitTime}ms before retry...`);
+        await delay(waitTime);
       }
     }
   }
@@ -531,7 +588,7 @@ class HardwareClient {
   }
 
   async emergencyStop() {
-    logger.warn('EMERGENCY STOP');
+    logger.warn('🛑 EMERGENCY STOP INITIATED');
     
     try {
       await this.executeCommand('customMotor', CONFIG.motors.belt.stop);
@@ -540,9 +597,9 @@ class HardwareClient {
         position: CONFIG.motors.stepper.positions.home
       });
       await this.executeCommand('closeGate');
-      logger.success('Emergency stop complete');
+      logger.success('✅ Emergency stop complete');
     } catch (error) {
-      logger.error(`Emergency stop failed: ${error.message}`);
+      logger.error(`❌ Emergency stop failed: ${error.message}`);
     }
   }
 }
@@ -593,7 +650,7 @@ class HardwareWebSocket extends EventEmitter {
       // Module ID response
       if (message.function === '01') {
         state.data.moduleId = message.moduleId || message.data;
-        logger.success(`Module ID: ${state.data.moduleId}`);
+        logger.success(`✅ Module ID received: ${state.data.moduleId}`);
         this.emit('moduleId', state.data.moduleId);
         return;
       }
@@ -614,8 +671,10 @@ class HardwareWebSocket extends EventEmitter {
       // Object detection
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
+        logger.info(`Device status code: ${code}`);
+        
         if (code === 4 && state.flags.autoCycleEnabled && !state.flags.cycleInProgress) {
-          logger.info('Object detected - taking photo');
+          logger.info('👁️ Object detected - taking photo');
           state.clearTimer('autoPhoto');
           setTimeout(() => hardwareClient.executeCommand('takePhoto'), 1000);
         }
@@ -641,7 +700,7 @@ class HardwareWebSocket extends EventEmitter {
       timestamp: new Date().toISOString()
     };
 
-    logger.info(`AI Result: ${materialType} (${matchRate}%)`);
+    logger.info(`🤖 AI Result: ${materialType} (${matchRate}%)`);
 
     mqttClient.publish(
       CONFIG.mqtt.topics.aiResult,
@@ -654,10 +713,11 @@ class HardwareWebSocket extends EventEmitter {
       const threshold = Math.round(config.threshold * 100);
 
       if (matchRate >= threshold) {
-        logger.success('Confidence sufficient - getting weight');
+        logger.success(`✅ Confidence sufficient: ${matchRate}% >= ${threshold}%`);
+        logger.info('📊 Getting weight...');
         setTimeout(() => hardwareClient.executeCommand('getWeight'), 500);
       } else {
-        logger.warn(`Confidence too low: ${matchRate}% < ${threshold}%`);
+        logger.warn(`⚠️ Confidence too low: ${matchRate}% < ${threshold}%`);
       }
     }
   }
@@ -674,7 +734,7 @@ class HardwareWebSocket extends EventEmitter {
       timestamp: new Date().toISOString()
     };
 
-    logger.info(`Weight: ${state.data.weight.weight}g`);
+    logger.info(`⚖️ Weight: ${state.data.weight.weight}g (raw: ${rawWeight})`);
 
     mqttClient.publish(
       CONFIG.mqtt.topics.weightResult,
@@ -687,7 +747,7 @@ class HardwareWebSocket extends EventEmitter {
         state.data.calibrationAttempts < CONFIG.weight.maxCalibrationAttempts) {
       
       state.data.calibrationAttempts++;
-      logger.warn(`Calibrating weight (${state.data.calibrationAttempts}/${CONFIG.weight.maxCalibrationAttempts})`);
+      logger.warn(`⚠️ Calibrating weight (${state.data.calibrationAttempts}/${CONFIG.weight.maxCalibrationAttempts})`);
       
       setTimeout(async () => {
         await hardwareClient.executeCommand('calibrateWeight');
@@ -707,6 +767,7 @@ class HardwareWebSocket extends EventEmitter {
         !state.flags.cycleInProgress) {
       
       state.flags.cycleInProgress = true;
+      logger.info('✅ Ready to start processing cycle');
       setTimeout(() => cycleManager.execute(), 1000);
     }
   }
@@ -759,7 +820,7 @@ class CycleManager {
   async execute() {
     const startTime = Date.now();
 
-    logger.box('STARTING CYCLE', [
+    logger.box('🚀 STARTING PROCESSING CYCLE', [
       `Session: ${state.data.sessionId}`,
       `User: ${state.data.currentUserData?.name || state.data.currentUserId}`,
       `Material: ${state.data.aiResult.materialType}`,
@@ -817,13 +878,14 @@ class CycleManager {
 
       // Complete
       const cycleTime = Math.round((Date.now() - startTime) / 1000);
-      logger.success(`Step 8/8: Cycle complete (${cycleTime}s)`);
+      logger.success(`✅ Step 8/8: Cycle complete (${cycleTime}s)`);
 
       // Publish transaction
       this.publishTransaction(cycleTime, 'success');
 
     } catch (error) {
-      logger.error(`Cycle failed: ${error.message}`);
+      logger.error(`❌ Cycle failed: ${error.message}`);
+      logger.error(error.stack);
       await hardwareClient.emergencyStop();
       this.publishTransaction(0, 'failed', error.message);
     } finally {
@@ -856,14 +918,19 @@ class CycleManager {
       { qos: CONFIG.mqtt.qos.status }
     );
 
-    logger.info('Transaction published');
+    logger.info('📤 Transaction published to MQTT');
   }
 
   cleanup() {
-    logger.info('Cleaning up cycle state');
+    logger.info('═══════════════════════════════════════');
+    logger.info('🔄 CLEANING UP - READY FOR NEXT SCAN');
+    logger.info('═══════════════════════════════════════');
+    
     state.reset();
     qrScanner.reset();
-    logger.success('Ready for next scan');
+    
+    logger.success('✅ System ready for next QR scan');
+    logger.info('═══════════════════════════════════════\n');
   }
 }
 
@@ -872,13 +939,22 @@ class CycleManager {
 // ============================================================
 class SessionManager {
   async handleQRScan(qrCode) {
+    logger.info('═══════════════════════════════════════');
+    logger.info('📱 HANDLE QR SCAN CALLED');
+    logger.info('═══════════════════════════════════════');
+    logger.info(`QR Code: ${qrCode}`);
+    logger.info(`isProcessingQR: ${state.flags.isProcessingQR}`);
+    logger.info(`qrScanEnabled: ${state.flags.qrScanEnabled}`);
+    logger.info(`Current State: ${state.getState()}`);
+    logger.info('═══════════════════════════════════════');
+
     if (state.flags.isProcessingQR) {
-      logger.warn('Already processing QR - ignoring');
+      logger.warn('⏳ Already processing QR - ignoring');
       return;
     }
 
     if (!state.flags.qrScanEnabled) {
-      logger.warn('QR scanning disabled - session active');
+      logger.warn('⏳ QR scanning disabled - session active');
       return;
     }
 
@@ -886,16 +962,24 @@ class SessionManager {
     state.setState('VALIDATING_QR');
 
     try {
-      logger.box('QR CODE VALIDATION', [
+      logger.box('QR CODE VALIDATION STARTED', [
         `Code: ${qrCode}`,
         `Time: ${new Date().toLocaleTimeString()}`
       ]);
 
       // Validate with backend
+      logger.info('🔄 Calling backend validation...');
       const validation = await backendClient.validateQR(qrCode);
 
+      logger.info(`✅ Backend call completed - Valid: ${validation.valid}`);
+
       if (!validation.valid) {
-        logger.error(`Invalid QR: ${validation.error}`);
+        logger.error(`❌ Invalid QR: ${validation.error}`);
+        logger.box('QR VALIDATION FAILED', [
+          `Error: ${validation.error}`,
+          'Gate remains closed',
+          'Ready for next scan'
+        ]);
         state.reset();
         return;
       }
@@ -905,7 +989,7 @@ class SessionManager {
       state.data.currentUserId = qrCode;
       state.data.currentUserData = validation.user;
 
-      logger.box('QR VALIDATED', [
+      logger.box('✅ QR VALIDATED SUCCESSFULLY', [
         `User: ${validation.user.name || qrCode}`,
         `Email: ${validation.user.email || 'N/A'}`,
         `Points: ${validation.user.currentPoints || 0}`,
@@ -928,40 +1012,54 @@ class SessionManager {
         { qos: CONFIG.mqtt.qos.default }
       );
 
+      logger.info('📤 QR scan event published to MQTT');
+
       // Start automation
       await this.startAutomation();
 
     } catch (error) {
-      logger.error(`QR handling failed: ${error.message}`);
+      logger.error(`❌ QR handling failed: ${error.message}`);
+      logger.error(error.stack);
       state.reset();
     }
   }
 
   async ensureModuleId() {
-    if (state.data.moduleId) return;
+    if (state.data.moduleId) {
+      logger.info(`✅ Module ID already available: ${state.data.moduleId}`);
+      return;
+    }
 
-    logger.warn('Module ID not available - requesting...');
+    logger.warn('⚠️ Module ID not available - requesting...');
 
     for (let i = 0; i < CONFIG.timing.maxModuleIdAttempts; i++) {
+      logger.info(`Attempt ${i + 1}/${CONFIG.timing.maxModuleIdAttempts}`);
+      
       await hardwareClient.executeCommand('getModuleId');
       await delay(CONFIG.timing.moduleIdRetry);
 
       if (state.data.moduleId) {
-        logger.success(`Module ID obtained: ${state.data.moduleId}`);
+        logger.success(`✅ Module ID obtained: ${state.data.moduleId}`);
         return;
       }
     }
 
-    throw new Error('Failed to obtain Module ID');
+    throw new Error('Failed to obtain Module ID after all attempts');
   }
 
   async startAutomation() {
-    logger.info('Starting automation sequence');
+    logger.info('═══════════════════════════════════════');
+    logger.info('🚀 STARTING AUTOMATION SEQUENCE');
+    logger.info('═══════════════════════════════════════');
+    
     state.setState('AUTOMATING');
 
     // Disable QR scanning during session
     state.flags.qrScanEnabled = false;
     state.flags.autoCycleEnabled = true;
+
+    logger.info('🔒 QR scanning disabled for session');
+    logger.info('✅ Auto cycle enabled');
 
     // Publish auto control
     mqttClient.publish(
@@ -971,25 +1069,28 @@ class SessionManager {
     );
 
     // Reset motors
-    logger.info('Resetting system');
+    logger.info('🔧 Resetting system motors...');
     await hardwareClient.executeCommand('customMotor', CONFIG.motors.belt.stop);
     await hardwareClient.executeCommand('customMotor', CONFIG.motors.compactor.stop);
     await hardwareClient.executeCommand('stepperMotor', {
       position: CONFIG.motors.stepper.positions.home
     });
     await delay(2000);
+    logger.success('✅ Motors reset complete');
 
     // Open gate
-    logger.info('Opening gate');
+    logger.info('🚪 Opening gate...');
     await hardwareClient.executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
 
-    logger.success('Gate open - waiting for object detection');
+    logger.success('✅ Gate opened - waiting for object detection');
+    logger.info(`⏰ Auto photo in ${CONFIG.timing.autoPhotoDelay / 1000}s if no detection`);
+    logger.info('═══════════════════════════════════════\n');
 
     // Set auto photo timer
     state.setTimer('autoPhoto', async () => {
       if (state.flags.autoCycleEnabled && !state.flags.cycleInProgress && !state.data.aiResult) {
-        logger.info('Auto photo triggered');
+        logger.info('⏰ Auto photo timer triggered');
         await hardwareClient.executeCommand('takePhoto');
       }
     }, CONFIG.timing.autoPhotoDelay);
@@ -1048,7 +1149,7 @@ async function handleMQTTMessage(topic, message) {
 
     if (topic === CONFIG.mqtt.topics.autoControl) {
       state.flags.autoCycleEnabled = payload.enabled === true;
-      logger.info(`Auto mode: ${state.flags.autoCycleEnabled ? 'ON' : 'OFF'}`);
+      logger.info(`🤖 Auto mode: ${state.flags.autoCycleEnabled ? 'ON' : 'OFF'}`);
 
       if (state.data.moduleId) {
         if (state.flags.autoCycleEnabled) {
@@ -1061,9 +1162,10 @@ async function handleMQTTMessage(topic, message) {
     }
 
     if (topic === CONFIG.mqtt.topics.commands) {
-      logger.info(`MQTT command: ${payload.action}`);
+      logger.info(`📩 MQTT command: ${payload.action}`);
 
       if (payload.action === 'takePhoto' && state.data.moduleId) {
+        logger.info('📸 Manual photo command received');
         state.clearTimer('autoPhoto');
         await hardwareClient.executeCommand('takePhoto');
         return;
@@ -1079,7 +1181,7 @@ async function handleMQTTMessage(topic, message) {
             taskId: `manual_${Date.now()}`,
             timestamp: new Date().toISOString()
           };
-          logger.info(`Manual override: ${payload.materialType}`);
+          logger.info(`🔧 Manual material override: ${payload.materialType}`);
 
           if (state.flags.autoCycleEnabled) {
             setTimeout(() => hardwareClient.executeCommand('getWeight'), 500);
@@ -1143,7 +1245,8 @@ const sessionManager = new SessionManager();
 const cycleManager = new CycleManager();
 
 function gracefulShutdown() {
-  logger.warn('Shutting down...');
+  logger.warn('\n🛑 GRACEFUL SHUTDOWN INITIATED');
+  logger.info('═══════════════════════════════════════');
 
   publishStatus('offline');
 
@@ -1154,18 +1257,35 @@ function gracefulShutdown() {
     mqttClient.end(true);
   }
 
+  logger.info('✅ Cleanup complete');
+  logger.info('═══════════════════════════════════════');
+  
   process.exit(0);
 }
 
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
+process.on('uncaughtException', (error) => {
+  logger.error('❌ UNCAUGHT EXCEPTION:');
+  logger.error(error.message);
+  logger.error(error.stack);
+  gracefulShutdown();
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('❌ UNHANDLED REJECTION:');
+  logger.error(reason);
+  gracefulShutdown();
+});
+
 // ============================================================
 // STARTUP
 // ============================================================
 async function startup() {
-  logger.box('RVM AGENT v10.0 - PRODUCTION', [
+  logger.box('RVM AGENT v10.1 - PRODUCTION', [
     `Device: ${CONFIG.device.id}`,
+    `Version: ${CONFIG.device.version}`,
     `Environment: ${CONFIG.device.environment}`,
     `Backend: ${CONFIG.backend.url}`,
     `MQTT: ${CONFIG.mqtt.brokerUrl}`,
@@ -1176,7 +1296,8 @@ async function startup() {
     '  ✅ Automatic error recovery',
     '  ✅ Health monitoring',
     '  ✅ Production logging',
-    '  ✅ Zero-downtime operation'
+    '  ✅ Zero-downtime operation',
+    '  ✅ Complete debugging enabled'
   ]);
 
   try {
@@ -1184,6 +1305,7 @@ async function startup() {
     initializeMQTT();
 
     // Wait for MQTT connection
+    logger.info('⏳ Waiting for MQTT connection...');
     await new Promise(resolve => {
       mqttClient.once('connect', resolve);
     });
@@ -1192,23 +1314,41 @@ async function startup() {
     hardwareWS.connect();
 
     // Wait for WebSocket connection
+    logger.info('⏳ Waiting for WebSocket connection...');
     await new Promise(resolve => {
       hardwareWS.once('connected', resolve);
     });
 
     // Wait a bit for module ID
+    logger.info('⏳ Waiting for module ID...');
     await delay(2000);
+
+    // CRITICAL: Connect QR scanner event handler BEFORE starting scanner
+    logger.info('🔗 Connecting QR scanner event handler...');
+    qrScanner.on('scan', async (code) => {
+      logger.info(`🔔 QR SCAN EVENT RECEIVED: ${code}`);
+      
+      try {
+        await sessionManager.handleQRScan(code);
+      } catch (error) {
+        logger.error(`❌ QR handler error: ${error.message}`);
+        logger.error(error.stack);
+        state.reset();
+        qrScanner.reset();
+      }
+    });
+    logger.success('✅ QR scanner event handler connected');
 
     // Start QR scanner
     qrScanner.start();
 
-    // Connect QR scanner to session manager
-    qrScanner.on('scan', code => sessionManager.handleQRScan(code));
-
-    logger.success('System ready - waiting for QR scans');
+    logger.success('═══════════════════════════════════════');
+    logger.success('✅ SYSTEM READY - WAITING FOR QR SCANS');
+    logger.success('═══════════════════════════════════════\n');
 
   } catch (error) {
-    logger.error(`Startup failed: ${error.message}`);
+    logger.error(`❌ Startup failed: ${error.message}`);
+    logger.error(error.stack);
     process.exit(1);
   }
 }
