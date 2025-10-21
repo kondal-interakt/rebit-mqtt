@@ -628,9 +628,13 @@ function connectWebSocket() {
         return;
       }
       
-      // Object detection (v8.0 LOGIC!)
+      // Object detection (v8.0 LOGIC!) - WITH DEBUG
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
+        
+        // DEBUG: Show all deviceStatus messages
+        console.log(`📊 DeviceStatus: code=${code}, auto=${state.autoCycleEnabled}, inProgress=${state.cycleInProgress}`);
+        
         // v8.0 LOGIC: Just check autoCycleEnabled!
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
           console.log('👤 Object detected - taking photo...\n');
