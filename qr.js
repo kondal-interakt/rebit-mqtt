@@ -45,8 +45,9 @@ const CONFIG = {
     minLength: 8,
     maxLength: 20,
     numericOnly: true,
-    scanThreshold: 100,  // Time gap to detect new scan (ms)
-    scanTimeout: 3000    // Maximum time to wait for complete scan
+    scanThreshold: 50,   // Time between chars from scanner (ms)
+    scanComplete: 200,   // Time to wait after last char (ms)
+    debounceTime: 2000   // Ignore duplicate scans within this time (ms)
   },
   
   motors: {
@@ -103,11 +104,9 @@ const state = {
   qrScanEnabled: true,
   currentUserId: null,
   currentUserData: null,
-  qrScanTimer: null,
-  qrTimeoutTimer: null,
   autoPhotoTimer: null,
-  qrBuffer: '',
-  lastKeyTime: 0,
+  lastProcessedQR: null,
+  lastProcessedTime: 0,
   isProcessingQR: false
 };
 
@@ -177,14 +176,14 @@ async function validateQRWithBackend(sessionCode) {
   }
 }
 
-// ======= IMPROVED QR SCANNER =======
+// ======= IMPROVED QR SCANNER - NO ENTER KEY =======
 function setupQRScanner() {
   console.log('\n========================================');
-  console.log('📱 FIXED QR SCANNER - ALWAYS ACTIVE');
+  console.log('📱 FIXED QR SCANNER - NO ENTER KEY MODE');
   console.log('========================================');
   console.log(`⌨️  Listening for QR codes (${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} chars)`);
-  console.log('🎯 Scanner detects Enter key automatically');
-  console.log('🔄 Automatic error recovery enabled');
+  console.log('🎯 Auto-detects scan completion by timing');
+  console.log('🔄 Automatic duplicate filtering');
   console.log('========================================\n');
 
   setupStdinScanner();
@@ -194,68 +193,115 @@ function setupQRScanner() {
 
 function setupStdinScanner() {
   process.stdin.setEncoding('utf8');
-  
-  // Use readline interface for better keyboard input handling
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: false
-  });
+  process.stdin.setRawMode(false); // Use cooked mode for better compatibility
+  process.stdin.resume();
 
-  // Buffer for accumulating characters
   let scanBuffer = '';
-  let lastCharTime = Date.now();
+  let lastCharTime = 0;
+  let processTimer = null;
 
   process.stdin.on('data', (chunk) => {
     const now = Date.now();
     const str = chunk.toString();
     
     // Check for Ctrl+C
-    if (str === '\u0003') {
+    if (str.includes('\u0003')) {
       gracefulShutdown();
       return;
     }
     
-    // If too much time passed, this is a new scan
-    if (now - lastCharTime > CONFIG.qr.scanThreshold) {
+    // If too much time passed since last char, this is a new scan
+    if (now - lastCharTime > CONFIG.qr.scanThreshold && scanBuffer.length > 0) {
+      console.log(`⏱️  Time gap detected (${now - lastCharTime}ms) - processing previous scan`);
+      processBufferNow(scanBuffer);
       scanBuffer = '';
     }
     
-    lastCharTime = now;
-    
     // Process each character
     for (let char of str) {
-      // Check for Enter key (various formats)
-      if (char === '\n' || char === '\r' || char === '\u000D' || char === '\u000A') {
-        if (scanBuffer.length > 0) {
-          handleCompleteScan(scanBuffer.trim());
-          scanBuffer = '';
-        }
+      // Skip newlines and carriage returns
+      if (char === '\n' || char === '\r') {
         continue;
       }
       
-      // Skip non-alphanumeric in numeric-only mode
-      if (CONFIG.qr.numericOnly && !/[\d]/.test(char)) {
+      // Skip non-numeric in numeric-only mode
+      if (CONFIG.qr.numericOnly && !/\d/.test(char)) {
         continue;
       }
       
       // Add character to buffer
       scanBuffer += char;
+      lastCharTime = now;
       
-      // Start timeout timer
-      clearTimeout(state.qrTimeoutTimer);
-      state.qrTimeoutTimer = setTimeout(() => {
-        if (scanBuffer.length >= CONFIG.qr.minLength) {
-          console.log('⏰ Scan timeout - processing accumulated data');
-          handleCompleteScan(scanBuffer.trim());
-          scanBuffer = '';
-        } else if (scanBuffer.length > 0) {
-          console.log(`❌ Incomplete scan timeout (${scanBuffer.length} chars) - discarding`);
-          scanBuffer = '';
-        }
-      }, CONFIG.qr.scanTimeout);
+      // If buffer exceeds max length, process immediately
+      if (scanBuffer.length >= CONFIG.qr.maxLength) {
+        console.log(`📏 Max length reached (${scanBuffer.length}) - processing now`);
+        clearTimeout(processTimer);
+        processBufferNow(scanBuffer);
+        scanBuffer = '';
+        continue;
+      }
+      
+      // If buffer is within valid range, set timer to process
+      if (scanBuffer.length >= CONFIG.qr.minLength) {
+        clearTimeout(processTimer);
+        processTimer = setTimeout(() => {
+          if (scanBuffer.length >= CONFIG.qr.minLength) {
+            processBufferNow(scanBuffer);
+            scanBuffer = '';
+          }
+        }, CONFIG.qr.scanComplete);
+      }
     }
   });
+
+  function processBufferNow(buffer) {
+    const qrCode = buffer.trim();
+    
+    // Validate length
+    if (qrCode.length < CONFIG.qr.minLength || qrCode.length > CONFIG.qr.maxLength) {
+      console.log(`❌ Invalid length: ${qrCode.length} chars (expected ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength})\n`);
+      return;
+    }
+    
+    // Validate format
+    if (CONFIG.qr.numericOnly && !/^\d+$/.test(qrCode)) {
+      console.log(`❌ Invalid format: "${qrCode}" (expected numeric only)\n`);
+      return;
+    }
+    
+    // Check for duplicates (debounce)
+    const now = Date.now();
+    if (state.lastProcessedQR === qrCode && 
+        (now - state.lastProcessedTime) < CONFIG.qr.debounceTime) {
+      const timeSince = Math.round((now - state.lastProcessedTime) / 1000);
+      console.log(`⏭️  Ignoring duplicate scan "${qrCode}" (${timeSince}s ago)\n`);
+      return;
+    }
+    
+    console.log(`\n✅ VALID QR DETECTED: "${qrCode}" (${qrCode.length} chars)`);
+    
+    // Update last processed
+    state.lastProcessedQR = qrCode;
+    state.lastProcessedTime = now;
+    
+    // Check if we can process
+    if (!state.qrScanEnabled) {
+      console.log('⏳ QR scanning disabled - session in progress\n');
+      return;
+    }
+    
+    if (state.isProcessingQR) {
+      console.log('⏳ Already processing QR - please wait\n');
+      return;
+    }
+    
+    // Process the QR code
+    handleQRCode(qrCode).catch(error => {
+      console.error('❌ QR processing error:', error.message);
+      resetQRFlags();
+    });
+  }
 
   process.stdin.on('error', (error) => {
     console.error('❌ STDIN error:', error.message);
@@ -269,53 +315,11 @@ function setupStdinScanner() {
       }
     }, 1000);
   });
-
-  // Keep stdin open
-  process.stdin.resume();
 }
 
 function handleCompleteScan(qrData) {
-  const qrCode = qrData.trim();
-  
-  console.log(`\n📱 RAW SCAN DATA: "${qrCode}" (${qrCode.length} chars)`);
-  
-  // Validate QR format
-  if (qrCode.length < CONFIG.qr.minLength || qrCode.length > CONFIG.qr.maxLength) {
-    console.log(`❌ Invalid length: Expected ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} characters\n`);
-    return;
-  }
-  
-  if (CONFIG.qr.numericOnly && !/^\d+$/.test(qrCode)) {
-    console.log(`❌ Invalid format: Expected numeric only\n`);
-    return;
-  }
-  
-  console.log(`✅ Valid QR detected: "${qrCode}"`);
-  
-  // Check if we can process
-  if (!state.qrScanEnabled) {
-    console.log('⏳ QR scanning disabled - session in progress\n');
-    return;
-  }
-  
-  if (state.isProcessingQR) {
-    console.log('⏳ Already processing QR - please wait\n');
-    return;
-  }
-  
-  // Process the QR code
-  handleQRCode(qrCode).catch(error => {
-    console.error('❌ QR processing error:', error.message);
-    // CRITICAL: Reset flags on error
-    resetQRFlags();
-  });
-}
-
-function resetQRFlags() {
-  state.isProcessingQR = false;
-  state.qrScanEnabled = true;
-  clearQRState();
-  console.log('🔄 QR scanner reset - ready for next scan\n');
+  // This function is no longer used, kept for compatibility
+  console.log('⚠️ handleCompleteScan called unexpectedly');
 }
 
 async function handleQRCode(qrCode) {
@@ -891,8 +895,7 @@ async function requestModuleId() {
 function gracefulShutdown() {
   console.log('\n⏹️ Shutting down...');
   
-  // Clear all timers
-  clearQRState();
+  // Clear timers
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
   }
@@ -920,16 +923,16 @@ process.on('uncaughtException', (error) => {
 // ======= STARTUP =======
 console.log('========================================');
 console.log('🚀 RVM AGENT v9.5 - FIXED QR SCANNER');
-console.log('🔄 ENTER KEY DETECTION + AUTO RECOVERY');
+console.log('🔄 NO ENTER KEY + DUPLICATE FILTERING');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('========================================');
 console.log('🎯 KEY FIXES:');
-console.log('   ✅ Enter key detection (primary)');
-console.log('   ✅ Timeout fallback (3 seconds)');
-console.log('   ✅ Buffer cleared on ALL errors');
-console.log('   ✅ Flags reset automatically');
-console.log('   ✅ Uncaught exception handling');
+console.log('   ✅ No Enter key required');
+console.log('   ✅ Character timing detection (50ms)');
+console.log('   ✅ Auto-process after 200ms pause');
+console.log('   ✅ Duplicate filtering (2 seconds)');
+console.log('   ✅ Length-based validation');
 console.log('========================================');
 console.log('⏳ Starting system...\n');

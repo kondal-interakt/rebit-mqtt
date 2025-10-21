@@ -190,6 +190,7 @@ function setupQRScanner() {
 }
 
 function setupRawModeScanner() {
+    console.log("Called rawmode scan function>>>>>>>>>>>>>>>>>>>")
   process.stdin.setEncoding('utf8');
   
   if (process.stdin.isTTY) {
@@ -217,11 +218,13 @@ function setupRawModeScanner() {
 }
 
 function setupReadlineScanner() {
+    console.log("Called readline scan function<<<<<<<<<<<<<<<<<<<<<<<<<")
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: false
   });
+  
 
   rl.on('line', (input) => {
     if (input.trim().length > 0) {
