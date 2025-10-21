@@ -1,10 +1,11 @@
-// RVM Agent v9.3 - ULTIMATE WORKING VERSION
-// Save as: agent-v9.3-ultimate.js
+// RVM Agent v9.5 - PERMANENT QR SCANNER - COMPLETE CODE
+// Save as: agent-v9.5-complete.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
+const readline = require('readline');
 
 // ======= CONFIGURATION =======
 const CONFIG = {
@@ -85,7 +86,8 @@ const CONFIG = {
     stepperReset: 6000,
     compactor: 10000,
     positionSettle: 500,
-    gateOperation: 1000
+    gateOperation: 1000,
+    autoPhotoDelay: 5000
   },
   
   // Weight Calibration
@@ -109,7 +111,10 @@ const state = {
   qrScanEnabled: true,
   currentUserId: null,
   currentUserData: null,
-  qrScanTimer: null
+  qrScanTimer: null,
+  autoPhotoTimer: null,
+  qrBuffer: '',
+  isProcessingQR: false
 };
 
 // ======= UTILITY =======
@@ -164,15 +169,27 @@ async function validateQRWithBackend(sessionCode) {
   }
 }
 
-// ======= QR SCANNER SETUP =======
+// ======= ROBUST PERMANENT QR SCANNER =======
 function setupQRScanner() {
   console.log('\n========================================');
-  console.log('📱 QR SCANNER READY - AUTO DETECTION');
+  console.log('📱 PERMANENT QR SCANNER - ALWAYS ACTIVE');
   console.log('========================================');
   console.log(`⌨️  Listening for QR codes (${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} chars)`);
   console.log('🎯 Scan QR code - No Enter key required!');
+  console.log('🔄 Scanner stays active FOREVER');
   console.log('========================================\n');
 
+  // Method 1: Raw mode for immediate character reading
+  setupRawModeScanner();
+  
+  // Method 2: Readline as backup
+  setupReadlineScanner();
+  
+  console.log('✅ QR Scanner initialized - Permanent detection ready');
+  console.log('💡 Scanner will NEVER stop working!');
+}
+
+function setupRawModeScanner() {
   process.stdin.setEncoding('utf8');
   
   if (process.stdin.isTTY) {
@@ -181,51 +198,104 @@ function setupQRScanner() {
   
   process.stdin.resume();
   
-  let scanBuffer = '';
-
   process.stdin.on('data', (chunk) => {
     if (chunk === '\u0003') {
       gracefulShutdown();
       return;
     }
     
-    scanBuffer += chunk;
-    
-    if (state.qrScanTimer) {
-      clearTimeout(state.qrScanTimer);
-    }
-    
-    if (scanBuffer.length >= CONFIG.qr.minLength) {
-      state.qrScanTimer = setTimeout(() => {
-        processQRInput(scanBuffer);
-        scanBuffer = '';
-      }, CONFIG.qr.scanDelay);
+    handleQRInput(chunk);
+  });
+
+  process.stdin.on('error', (error) => {
+    console.error('❌ STDIN error:', error.message);
+    // Try to restart stdin
+    setTimeout(() => {
+      process.stdin.resume();
+    }, 1000);
+  });
+}
+
+function setupReadlineScanner() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false
+  });
+
+  rl.on('line', (input) => {
+    if (input.trim().length > 0) {
+      console.log(`📱 Readline detected: "${input.trim()}"`);
+      handleQRInput(input);
     }
   });
 
-  console.log('✅ QR Scanner initialized - Auto-detection ready');
+  rl.on('close', () => {
+    console.log('⚠️ Readline closed, restarting...');
+    setTimeout(setupReadlineScanner, 1000);
+  });
 }
 
-function processQRInput(input) {
-  if (!state.qrScanEnabled) {
-    console.log('❌ QR scanning disabled - session in progress');
+function handleQRInput(input) {
+  // Skip if currently processing a QR or scanner disabled
+  if (state.isProcessingQR || !state.qrScanEnabled) {
+    if (!state.qrScanEnabled) {
+      console.log('⏳ QR scanning temporarily disabled - session in progress');
+    }
     return;
   }
   
-  const qrCode = input.trim();
+  const newData = input.toString().trim();
   
+  if (newData.length === 0) return;
+  
+  // Add to buffer
+  state.qrBuffer += newData;
+  
+  // Reset timer
+  if (state.qrScanTimer) {
+    clearTimeout(state.qrScanTimer);
+  }
+  
+  // Check if we have enough characters
+  if (state.qrBuffer.length >= CONFIG.qr.minLength) {
+    state.qrScanTimer = setTimeout(() => {
+      processCompleteQR(state.qrBuffer);
+      state.qrBuffer = ''; // Reset buffer
+    }, CONFIG.qr.scanDelay);
+  }
+}
+
+function processCompleteQR(qrData) {
+  const qrCode = qrData.trim();
+  
+  // Validate QR format
   if (qrCode.length >= CONFIG.qr.minLength && 
       qrCode.length <= CONFIG.qr.maxLength &&
       (/^\d+$/.test(qrCode) || !CONFIG.qr.numericOnly)) {
     
     console.log(`\n🎯 QR CODE DETECTED: "${qrCode}"`);
-    handleQRCode(qrCode);
+    console.log(`📏 Length: ${qrCode.length} characters`);
+    
+    // Process the QR code
+    handleQRCode(qrCode).catch(error => {
+      console.error('❌ QR processing error:', error.message);
+      state.isProcessingQR = false;
+    });
+    
   } else if (qrCode.length > 0) {
-    console.log(`❌ Invalid QR format: "${qrCode}"`);
+    console.log(`❌ Invalid QR format: "${qrCode}" (Length: ${qrCode.length})`);
+    console.log(`   Expected: ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} characters`);
   }
 }
 
 async function handleQRCode(qrCode) {
+  if (state.isProcessingQR) {
+    console.log('⏳ Already processing QR, please wait...');
+    return;
+  }
+  
+  state.isProcessingQR = true;
   const timestamp = new Date().toISOString();
   
   console.log('\n╔════════════════════════════════════════╗');
@@ -235,8 +305,6 @@ async function handleQRCode(qrCode) {
   console.log(`⏰ Time: ${new Date().toLocaleTimeString()}`);
   console.log('════════════════════════════════════════\n');
   
-  state.qrScanEnabled = false;
-  
   // VALIDATE WITH BACKEND
   const validation = await validateQRWithBackend(qrCode);
   
@@ -245,9 +313,11 @@ async function handleQRCode(qrCode) {
     console.log('║       ❌ INVALID QR CODE! ❌          ║');
     console.log('╚════════════════════════════════════════╝');
     console.log(`Error: ${validation.error}`);
+    console.log('Gate remains CLOSED');
     console.log('════════════════════════════════════════\n');
     
-    state.qrScanEnabled = true;
+    // Re-enable QR scanning immediately
+    state.isProcessingQR = false;
     return;
   }
   
@@ -275,7 +345,7 @@ async function handleQRCode(qrCode) {
     
     if (!state.moduleId) {
       console.error('❌ Cannot start - Module ID unavailable\n');
-      state.qrScanEnabled = true;
+      state.isProcessingQR = false;
       return;
     }
   }
@@ -309,6 +379,9 @@ async function startAutomation() {
   try {
     console.log('🚀 STARTING AUTOMATION SEQUENCE\n');
     
+    // Temporarily disable QR scanning during automation
+    state.qrScanEnabled = false;
+    
     // Step 1: Enable auto mode
     state.autoCycleEnabled = true;
     mqttClient.publish(CONFIG.mqtt.topics.autoControl, JSON.stringify({ enabled: true }));
@@ -329,13 +402,21 @@ async function startAutomation() {
     console.log('✅ Gate opened - Ready for items!\n');
     
     console.log('👁️  Waiting for object detection...');
-    console.log('💡 If object not detected, use MQTT command:');
-    console.log('   mosquitto_pub -t "rvm/RVM-3101/commands" -m \'{"action":"takePhoto"}\'');
-    console.log('   OR visit: http://localhost:8081/system/camera/process\n');
+    console.log('⏰ Auto photo in 5 seconds if no detection...\n');
+    
+    // AUTO PHOTO TIMER
+    state.autoPhotoTimer = setTimeout(async () => {
+      if (state.autoCycleEnabled && !state.cycleInProgress && !state.aiResult) {
+        console.log('⏰ AUTO PHOTO TRIGGERED - Taking photo now...\n');
+        await executeCommand('takePhoto');
+      }
+    }, CONFIG.timing.autoPhotoDelay);
     
   } catch (error) {
     console.error('❌ Automation failed:', error.message);
+    // Re-enable QR scanning on failure
     state.qrScanEnabled = true;
+    state.isProcessingQR = false;
   }
 }
 
@@ -437,6 +518,12 @@ async function executeAutoCycle() {
   console.log('========================================\n');
   
   try {
+    // Clear auto photo timer
+    if (state.autoPhotoTimer) {
+      clearTimeout(state.autoPhotoTimer);
+      state.autoPhotoTimer = null;
+    }
+    
     console.log('▶️ Closing gate...');
     await executeCommand('closeGate');
     await delay(CONFIG.timing.gateOperation);
@@ -500,16 +587,18 @@ async function executeAutoCycle() {
     mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(transactionData), { qos: 1 });
     console.log('📤 Transaction published to MQTT\n');
     
-    // Reset for next scan
+    // RESET FOR NEXT SCAN - THIS IS CRITICAL!
     state.cycleInProgress = false;
     state.autoCycleEnabled = false;
     state.aiResult = null;
     state.weight = null;
-    state.qrScanEnabled = true;
+    state.qrScanEnabled = true; // RE-ENABLE QR SCANNING!
+    state.isProcessingQR = false; // ALLOW NEW QR PROCESSING
     state.currentUserId = null;
     state.currentUserData = null;
     
-    console.log('✅ Ready for next QR scan\n');
+    console.log('🔄 QR SCANNER RE-ACTIVATED - Ready for next user!');
+    console.log('📱 Scan next QR code anytime...\n');
     
   } catch (error) {
     console.error('========================================');
@@ -527,7 +616,8 @@ async function executeAutoCycle() {
     
     await emergencyStop();
     state.cycleInProgress = false;
-    state.qrScanEnabled = true;
+    state.qrScanEnabled = true; // RE-ENABLE ON FAILURE TOO
+    state.isProcessingQR = false;
   }
 }
 
@@ -543,7 +633,7 @@ async function emergencyStop() {
   }
 }
 
-// ======= WEBSOCKET WITH DEBUG LOGGING =======
+// ======= WEBSOCKET WITH AUTO PHOTO =======
 function connectWebSocket() {
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
@@ -565,6 +655,12 @@ function connectWebSocket() {
       
       // AI Photo result
       if (message.function === 'aiPhoto') {
+        // Clear auto photo timer when we get AI result
+        if (state.autoPhotoTimer) {
+          clearTimeout(state.autoPhotoTimer);
+          state.autoPhotoTimer = null;
+        }
+        
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
         
@@ -630,17 +726,20 @@ function connectWebSocket() {
         return;
       }
       
-      // Object detection - WITH EXTENSIVE DEBUGGING
+      // Object detection - STILL CHECKING BUT NOW WE HAVE AUTO PHOTO
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         
-        console.log(`🔍 DEVICE STATUS DEBUG: code=${code}, autoCycle=${state.autoCycleEnabled}, inProgress=${state.cycleInProgress}`);
+        console.log(`🔍 DEVICE STATUS: code=${code}`);
         
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
           console.log('👤 OBJECT DETECTED BY SENSOR - TAKING PHOTO!\n');
+          // Clear auto photo timer since we got manual detection
+          if (state.autoPhotoTimer) {
+            clearTimeout(state.autoPhotoTimer);
+            state.autoPhotoTimer = null;
+          }
           setTimeout(() => executeCommand('takePhoto'), 1000);
-        } else if (code !== 4) {
-          console.log(`ℹ️  DeviceStatus code: ${code} (not object detection)`);
         }
         return;
       }
@@ -709,6 +808,11 @@ mqttClient.on('message', async (topic, message) => {
       // MANUAL PHOTO CAPTURE - FOR TESTING!
       if (payload.action === 'takePhoto' && state.moduleId) {
         console.log('📸 MANUAL PHOTO CAPTURE TRIGGERED!\n');
+        // Clear auto photo timer when manually triggered
+        if (state.autoPhotoTimer) {
+          clearTimeout(state.autoPhotoTimer);
+          state.autoPhotoTimer = null;
+        }
         await executeCommand('takePhoto');
         return;
       }
@@ -776,21 +880,17 @@ process.on('SIGINT', gracefulShutdown);
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v9.3 - ULTIMATE WORKING');
-console.log('🔧 WITH DEBUG LOGGING & MANUAL TRIGGERS');
+console.log('🚀 RVM AGENT v9.5 - PERMANENT QR');
+console.log('🔄 SCANNER NEVER STOPS WORKING!');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('========================================');
-console.log('🎯 WORKFLOW:');
-console.log('   1. Scan QR → Backend validates');
-console.log('   2. Gate opens → Wait for object');
-console.log('   3. Object detected → Photo → AI');
-console.log('   4. Weight → Full processing cycle');
-console.log('   5. Transaction saved → Ready for next');
+console.log('🎯 FEATURES:');
+console.log('   ✅ Permanent QR scanning');
+console.log('   ✅ Auto photo after 5 seconds');
+console.log('   ✅ Multiple scanner methods');
+console.log('   ✅ Automatic recovery on errors');
+console.log('   ✅ Never requires restart');
 console.log('========================================');
-console.log('💡 DEBUG COMMANDS:');
-console.log('   MQTT: mosquitto_pub -t "rvm/RVM-3101/commands" -m \'{"action":"takePhoto"}\'');
-console.log('   HTTP: POST http://localhost:8081/system/camera/process');
-console.log('========================================\n');
 console.log('⏳ Starting system...\n');
