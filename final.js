@@ -1,7 +1,7 @@
-// RVM Agent v8.3 - Simplified Flow (RECOMMENDED)
-// Agent handles gate opening immediately after backend validation
-// No waiting for MQTT command - faster and simpler!
-// Save as: agent-v8.3-simplified.js
+// RVM Agent v8.1 - Your Working Code + Backend Validation ONLY
+// Minimal change: Just adds backend validation before opening gate
+// Everything else stays exactly the same!
+// Save as: agent-v8.1-validated.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -15,6 +15,7 @@ const CONFIG = {
     id: 'RVM-3101'
   },
   
+  // NEW: Backend validation URL
   backend: {
     url: 'https://rebit-api.ceewen.xyz',
     validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
@@ -99,7 +100,6 @@ const state = {
   ws: null,
   sessionId: null,
   currentUserId: null,
-  currentUserData: null,
   qrScanTimestamp: null,
   sessionActive: false,
   sessionTimer: null
@@ -115,7 +115,7 @@ function setupQRScanner() {
   console.log('📱 QR SCANNER READY');
   console.log('========================================');
   console.log(`⌨️  Listening for QR codes (${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} chars)`);
-  console.log('🎯 Scan QR code to validate and start');
+  console.log('🎯 Scan QR code to start automated cycle');
   console.log('========================================\n');
   
   const rl = readline.createInterface({
@@ -134,16 +134,16 @@ function setupQRScanner() {
       await handleQRScan(qrCode);
       
     } else {
-      console.log(`❌ Invalid QR length: "${qrCode}" (${qrCode.length} chars)`);
+      console.log(`❌ Invalid QR: "${qrCode}" (length: ${qrCode.length})`);
     }
   });
 }
 
-// ======= BACKEND QR VALIDATION =======
+// ======= NEW: BACKEND VALIDATION =======
 async function validateQRWithBackend(sessionCode) {
   const url = `${CONFIG.backend.url}${CONFIG.backend.validateEndpoint}`;
   
-  console.log('🔐 VALIDATING QR WITH BACKEND');
+  console.log('🔐 Validating with backend...');
   console.log(`   URL: ${url}`);
   console.log(`   Code: ${sessionCode}`);
   
@@ -157,74 +157,54 @@ async function validateQRWithBackend(sessionCode) {
       }
     );
     
-    console.log(`   Response: ${response.status}`);
+    console.log(`   Status: ${response.status}`);
     
     if (response.data && response.data.success) {
-      console.log('   ✅ VALIDATION SUCCESS!\n');
-      return {
-        valid: true,
-        user: response.data.user || {},
-        data: response.data
-      };
+      console.log('   ✅ VALID!\n');
+      return { valid: true, user: response.data.user || {} };
     } else {
-      console.log('   ❌ VALIDATION FAILED');
-      console.log(`   Error: ${response.data?.error || 'Unknown'}\n`);
+      console.log(`   ❌ INVALID: ${response.data?.error || 'Unknown'}\n`);
       return { valid: false, error: response.data?.error || 'Invalid QR' };
     }
     
   } catch (error) {
-    console.error('   ❌ BACKEND ERROR');
+    console.error('   ❌ ERROR');
     
     if (error.response) {
-      const errorMsg = error.response.data?.error || error.response.statusText;
-      console.error(`   Status: ${error.response.status}`);
-      console.error(`   Error: ${errorMsg}\n`);
-      return { valid: false, error: errorMsg };
+      console.error(`   HTTP ${error.response.status}: ${error.response.data?.error || error.response.statusText}\n`);
+      return { valid: false, error: error.response.data?.error || 'Validation failed' };
     }
     
     console.error(`   ${error.message}\n`);
-    
-    if (error.code === 'ECONNREFUSED') {
-      console.error('   Backend not reachable!');
-    } else if (error.code === 'ETIMEDOUT') {
-      console.error('   Backend timeout!');
-    }
-    
     return { valid: false, error: error.message };
   }
 }
 
-// ======= SIMPLIFIED QR HANDLER =====
+// ======= QR SCAN HANDLER (WITH VALIDATION) =======
 async function handleQRScan(qrCode) {
   const timestamp = new Date().toISOString();
   
   console.log('╔════════════════════════════════════════╗');
-  console.log('║   🎯 QR CODE VALIDATION STARTED        ║');
+  console.log('║   🎯 STARTING AUTOMATED CYCLE          ║');
   console.log('╚════════════════════════════════════════╝');
-  console.log(`📱 Session Code: ${qrCode}`);
+  console.log(`👤 User ID: ${qrCode}`);
   console.log(`⏰ Time: ${new Date().toLocaleTimeString()}`);
+  console.log(`🔧 Module ID: ${state.moduleId || 'CHECKING...'}`);
   console.log('════════════════════════════════════════\n');
   
-  // STEP 1: Validate with backend
+  // ===== NEW: VALIDATE WITH BACKEND FIRST =====
   const validation = await validateQRWithBackend(qrCode);
   
   if (!validation.valid) {
     console.log('╔════════════════════════════════════════╗');
     console.log('║       ❌ INVALID QR CODE! ❌          ║');
     console.log('╚════════════════════════════════════════╝');
-    console.log(`Error: ${validation.error}`);
-    console.log('Gate remains CLOSED');
+    console.log(`Reason: ${validation.error}`);
+    console.log('Gate will NOT open');
     console.log('════════════════════════════════════════\n');
-    return;
+    return; // STOP HERE if invalid
   }
-  
-  console.log('╔════════════════════════════════════════╗');
-  console.log('║    ✅ QR VALIDATED! STARTING NOW...   ║');
-  console.log('╚════════════════════════════════════════╝');
-  console.log(`👤 User: ${validation.user.name || qrCode}`);
-  console.log(`📧 Email: ${validation.user.email || 'N/A'}`);
-  console.log(`💰 Points: ${validation.user.currentPoints || 0}`);
-  console.log('════════════════════════════════════════\n');
+  // ============================================
   
   // Verify Module ID
   if (!state.moduleId) {
@@ -247,36 +227,44 @@ async function handleQRScan(qrCode) {
     }
   }
   
-  // STEP 2: Store session info
+  // Store session info
   state.currentUserId = qrCode;
-  state.currentUserData = validation.user;
   state.qrScanTimestamp = timestamp;
   state.sessionId = generateSessionId();
   state.sessionActive = true;
-  state.autoCycleEnabled = true; // Enable auto mode
   
-  console.log(`✅ Session ID: ${state.sessionId}`);
-  console.log('✅ Auto mode enabled\n');
+  console.log(`✅ Session ID: ${state.sessionId}\n`);
   
-  // Publish QR scan event to MQTT (for backend tracking)
+  // Publish QR scan to MQTT
   mqttClient.publish(
     CONFIG.mqtt.topics.qrScanned,
     JSON.stringify({
       userId: qrCode,
       deviceId: CONFIG.device.id,
       sessionId: state.sessionId,
-      userData: validation.user,
       timestamp: timestamp
     }),
     { qos: 1 }
   );
   
-  // STEP 3: START AUTOMATION IMMEDIATELY
+  console.log('📤 QR scan published to MQTT\n');
+  
+  // START AUTOMATION SEQUENCE
   try {
     console.log('🚀 Starting automation sequence...\n');
     
-    // Reset motors
-    console.log('▶️  [1/3] Resetting motors...');
+    // Step 1: Enable auto mode
+    console.log('▶️  [1/4] Enabling auto mode...');
+    state.autoCycleEnabled = true;
+    mqttClient.publish(
+      CONFIG.mqtt.topics.autoControl,
+      JSON.stringify({ enabled: true })
+    );
+    await delay(500);
+    console.log('    ✅ Auto mode enabled\n');
+    
+    // Step 2: Reset motors
+    console.log('▶️  [2/4] Resetting motors...');
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await delay(200);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
@@ -287,21 +275,20 @@ async function handleQRScan(qrCode) {
     await delay(2000);
     console.log('    ✅ Motors reset\n');
     
-    // Open gate IMMEDIATELY (no waiting for MQTT!)
-    console.log('▶️  [2/3] Opening gate...');
+    // Step 3: Open gate
+    console.log('▶️  [3/4] Opening gate...');
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
-    console.log('    ✅ Gate OPEN!\n');
+    console.log('    ✅ Gate opened\n');
     
-    // Start session timeout
-    console.log('▶️  [3/3] Session timeout started...');
+    // Step 4: Start session timeout
+    console.log('▶️  [4/4] Waiting for object...');
     startSessionTimeout();
     console.log('    ✅ Ready for item\n');
     
     console.log('╔════════════════════════════════════════╗');
     console.log('║      🎉 INSERT BOTTLE/CAN NOW! 🎉     ║');
-    console.log('╚════════════════════════════════════════╝');
-    console.log(`⏳ Waiting for item (${CONFIG.qr.sessionTimeout / 1000}s timeout)...\n`);
+    console.log('╚════════════════════════════════════════╝\n');
     
   } catch (error) {
     console.error('╔════════════════════════════════════════╗');
@@ -316,6 +303,8 @@ async function handleQRScan(qrCode) {
 
 // ======= SESSION TIMEOUT =======
 function startSessionTimeout() {
+  console.log(`⏳ Session timeout: ${CONFIG.qr.sessionTimeout / 1000} seconds\n`);
+  
   if (state.sessionTimer) {
     clearTimeout(state.sessionTimer);
   }
@@ -351,7 +340,6 @@ async function endSession() {
   }
   
   state.currentUserId = null;
-  state.currentUserData = null;
   state.qrScanTimestamp = null;
   state.sessionId = null;
   
@@ -476,7 +464,7 @@ async function executeAutoCycle() {
   console.log('║         🚀 PROCESSING ITEM 🚀         ║');
   console.log('╚════════════════════════════════════════╝');
   console.log(`📋 Session: ${state.sessionId}`);
-  console.log(`👤 User: ${state.currentUserData?.name || state.currentUserId || 'N/A'}`);
+  console.log(`👤 User: ${state.currentUserId || 'N/A'}`);
   console.log(`📍 Material: ${state.aiResult.materialType}`);
   console.log(`📊 Confidence: ${state.aiResult.matchRate}%`);
   console.log(`⚖️  Weight: ${state.weight.weight}g`);
@@ -764,10 +752,9 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
-    // Manual auto control (kept for backward compatibility)
     if (topic === CONFIG.mqtt.topics.autoControl) {
       state.autoCycleEnabled = payload.enabled === true;
-      console.log(`🤖 Manual auto mode command: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
+      console.log(`🤖 Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
       
       if (state.autoCycleEnabled && state.moduleId) {
         await executeCommand('openGate');
@@ -829,16 +816,18 @@ process.on('SIGINT', () => {
 
 // ======= STARTUP =======
 console.log('╔════════════════════════════════════════╗');
-console.log('║   RVM AGENT v8.3 - SIMPLIFIED FLOW    ║');
+console.log('║   RVM AGENT v8.1 + QR VALIDATION      ║');
 console.log('╚════════════════════════════════════════╝');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('════════════════════════════════════════');
-console.log('🎯 SIMPLIFIED WORKFLOW:');
-console.log('   1. Scan QR → Validate with backend');
-console.log('   2. If valid → Gate opens IMMEDIATELY');
-console.log('   3. No waiting for MQTT!');
-console.log('   4. Insert item → Auto processing');
-console.log('   5. Transaction saved → Done');
+console.log('🎯 WORKFLOW:');
+console.log('   1. Scan QR code');
+console.log('   2. Validate with backend ⭐ NEW!');
+console.log('   3. If valid → Gate opens');
+console.log('   4. Insert bottle/can');
+console.log('   5. AI detects + weighs');
+console.log('   6. Auto-processing + crushing');
+console.log('   7. Session ends');
 console.log('════════════════════════════════════════');
 console.log('⏳ Starting system...\n');
