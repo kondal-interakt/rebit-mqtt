@@ -1,6 +1,5 @@
-// RVM Agent v9.2 - FINAL WORKING VERSION
-// Combines: v8.0 working logic + QR validation
-// Save as: agent-v9.2-final.js
+// RVM Agent v9.3 - ULTIMATE WORKING VERSION
+// Save as: agent-v9.3-ultimate.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
@@ -95,7 +94,7 @@ const CONFIG = {
   }
 };
 
-// ======= STATE (SIMPLE LIKE v8.0) =======
+// ======= STATE =======
 const state = {
   moduleId: null,
   aiResult: null,
@@ -301,16 +300,16 @@ async function handleQRCode(qrCode) {
     { qos: 1 }
   );
   
-  // START AUTOMATION (LIKE v8.0)
+  // START AUTOMATION
   await startAutomation();
 }
 
-// ======= START AUTOMATION (v8.0 STYLE - SIMPLE!) =======
+// ======= START AUTOMATION =======
 async function startAutomation() {
   try {
     console.log('🚀 STARTING AUTOMATION SEQUENCE\n');
     
-    // Step 1: Enable auto mode (LIKE v8.0!)
+    // Step 1: Enable auto mode
     state.autoCycleEnabled = true;
     mqttClient.publish(CONFIG.mqtt.topics.autoControl, JSON.stringify({ enabled: true }));
     console.log('✅ Auto mode enabled\n');
@@ -329,7 +328,10 @@ async function startAutomation() {
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate opened - Ready for items!\n');
     
-    console.log('👁️  Waiting for object detection...\n');
+    console.log('👁️  Waiting for object detection...');
+    console.log('💡 If object not detected, use MQTT command:');
+    console.log('   mosquitto_pub -t "rvm/RVM-3101/commands" -m \'{"action":"takePhoto"}\'');
+    console.log('   OR visit: http://localhost:8081/system/camera/process\n');
     
   } catch (error) {
     console.error('❌ Automation failed:', error.message);
@@ -414,13 +416,14 @@ async function executeCommand(action, params = {}) {
       throw new Error(`Unknown action: ${action}`);
   }
   
+  console.log(`🔧 Executing: ${action}`, params);
   await axios.post(apiUrl, apiPayload, { timeout: CONFIG.local.timeout, headers: { 'Content-Type': 'application/json' } });
   
   if (action === 'takePhoto') await delay(1500);
   if (action === 'getWeight') await delay(2000);
 }
 
-// ======= AUTO CYCLE (v8.0 LOGIC) =======
+// ======= AUTO CYCLE =======
 async function executeAutoCycle() {
   const cycleStartTime = Date.now();
   
@@ -540,7 +543,7 @@ async function emergencyStop() {
   }
 }
 
-// ======= WEBSOCKET (v8.0 LOGIC - WORKING!) =======
+// ======= WEBSOCKET WITH DEBUG LOGGING =======
 function connectWebSocket() {
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
@@ -552,6 +555,7 @@ function connectWebSocket() {
   state.ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
+      console.log(`📡 WebSocket message: ${message.function}`, message.data);
       
       if (message.function === '01') {
         state.moduleId = message.moduleId || message.data;
@@ -559,7 +563,7 @@ function connectWebSocket() {
         return;
       }
       
-      // AI Photo result (v8.0 LOGIC!)
+      // AI Photo result
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
@@ -576,7 +580,6 @@ function connectWebSocket() {
         
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
         
-        // v8.0 LOGIC: Just check autoCycleEnabled!
         if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
           const threshold = CONFIG.detection[state.aiResult.materialType];
           const thresholdPercent = Math.round(threshold * 100);
@@ -591,7 +594,7 @@ function connectWebSocket() {
         return;
       }
       
-      // Weight result (v8.0 LOGIC!)
+      // Weight result
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
@@ -620,7 +623,6 @@ function connectWebSocket() {
         
         if (state.weight.weight > 0) state.calibrationAttempts = 0;
         
-        // v8.0 LOGIC: Just check autoCycleEnabled!
         if (state.autoCycleEnabled && state.aiResult && state.weight.weight > 1 && !state.cycleInProgress) {
           state.cycleInProgress = true;
           setTimeout(() => executeAutoCycle(), 1000);
@@ -628,17 +630,17 @@ function connectWebSocket() {
         return;
       }
       
-      // Object detection (v8.0 LOGIC!) - WITH DEBUG
+      // Object detection - WITH EXTENSIVE DEBUGGING
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         
-        // DEBUG: Show all deviceStatus messages
-        console.log(`📊 DeviceStatus: code=${code}, auto=${state.autoCycleEnabled}, inProgress=${state.cycleInProgress}`);
+        console.log(`🔍 DEVICE STATUS DEBUG: code=${code}, autoCycle=${state.autoCycleEnabled}, inProgress=${state.cycleInProgress}`);
         
-        // v8.0 LOGIC: Just check autoCycleEnabled!
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
-          console.log('👤 Object detected - taking photo...\n');
+          console.log('👤 OBJECT DETECTED BY SENSOR - TAKING PHOTO!\n');
           setTimeout(() => executeCommand('takePhoto'), 1000);
+        } else if (code !== 4) {
+          console.log(`ℹ️  DeviceStatus code: ${code} (not object detection)`);
         }
         return;
       }
@@ -704,6 +706,13 @@ mqttClient.on('message', async (topic, message) => {
     if (topic === CONFIG.mqtt.topics.commands) {
       console.log(`📩 Command: ${payload.action}`);
       
+      // MANUAL PHOTO CAPTURE - FOR TESTING!
+      if (payload.action === 'takePhoto' && state.moduleId) {
+        console.log('📸 MANUAL PHOTO CAPTURE TRIGGERED!\n');
+        await executeCommand('takePhoto');
+        return;
+      }
+      
       if (payload.action === 'setMaterial') {
         const validMaterials = ['METAL_CAN', 'PLASTIC_BOTTLE', 'GLASS'];
         if (validMaterials.includes(payload.materialType)) {
@@ -767,7 +776,9 @@ process.on('SIGINT', gracefulShutdown);
 
 // ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT v9.2 - FINAL WORKING');
+console.log('🚀 RVM AGENT v9.3 - ULTIMATE WORKING');
+console.log('🔧 WITH DEBUG LOGGING & MANUAL TRIGGERS');
+console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('========================================');
@@ -778,4 +789,8 @@ console.log('   3. Object detected → Photo → AI');
 console.log('   4. Weight → Full processing cycle');
 console.log('   5. Transaction saved → Ready for next');
 console.log('========================================');
+console.log('💡 DEBUG COMMANDS:');
+console.log('   MQTT: mosquitto_pub -t "rvm/RVM-3101/commands" -m \'{"action":"takePhoto"}\'');
+console.log('   HTTP: POST http://localhost:8081/system/camera/process');
+console.log('========================================\n');
 console.log('⏳ Starting system...\n');
