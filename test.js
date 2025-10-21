@@ -1,11 +1,10 @@
-// RVM Agent v9.0 - FULLY AUTOMATED WITH QR & BACKEND VALIDATION
+// RVM Agent v9.0 - FULLY AUTOMATED WITH QR & BACKEND VALIDATION - FIXED
 // Save as: agent-v9.0-full-auto-fixed.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
-const readline = require('readline');
 
 // ======= CONFIGURATION =======
 const CONFIG = {
@@ -111,7 +110,6 @@ const state = {
   
   // QR & Automation state
   qrData: '',
-  lastKeyTime: 0,
   qrScanEnabled: true,
   currentUserId: null,
   currentUserData: null,
@@ -182,7 +180,7 @@ async function validateQRWithBackend(sessionCode) {
   }
 }
 
-// ======= FULLY AUTOMATED QR SCANNING =======
+// ======= ROBUST QR SCANNER SETUP =======
 function setupQRScanner() {
   console.log('\n========================================');
   console.log('📱 QR SCANNER READY');
@@ -191,30 +189,66 @@ function setupQRScanner() {
   console.log('🎯 Scan QR code to validate and start automation');
   console.log('========================================\n');
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: false
+  // Method 1: Direct stdin listening (most reliable)
+  process.stdin.setEncoding('utf8');
+  
+  let buffer = '';
+  
+  process.stdin.on('data', (chunk) => {
+    buffer += chunk;
+    
+    // Split by newlines to handle multiple inputs
+    const lines = buffer.split('\n');
+    
+    // Process all complete lines
+    for (let i = 0; i < lines.length - 1; i++) {
+      const line = lines[i].trim();
+      if (line) {
+        processQRInput(line);
+      }
+    }
+    
+    // Keep the last incomplete line in buffer
+    buffer = lines[lines.length - 1];
   });
 
-  rl.on('line', (input) => {
-    if (!state.qrScanEnabled) return;
-    
-    const qrCode = input.trim();
-    
-    // Validate QR code format
-    if (qrCode.length >= CONFIG.qr.minLength && 
-        qrCode.length <= CONFIG.qr.maxLength &&
-        (/^\d+$/.test(qrCode) || !CONFIG.qr.numericOnly)) {
-      
-      console.log(`\n📱 QR CODE SCANNED: "${qrCode}"\n`);
-      handleQRCode(qrCode);
-    } else {
-      console.log(`❌ Invalid QR format: "${qrCode}" (Length: ${qrCode.length})`);
+  process.stdin.on('end', () => {
+    if (buffer.trim()) {
+      processQRInput(buffer.trim());
     }
   });
 
+  // Method 2: Fallback - manual input simulation for testing
+  console.log('💡 Tip: If QR scanner not working, type the QR code manually and press Enter\n');
+
+  // Make sure stdin is readable
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode && process.stdin.setRawMode(false);
+  }
+  process.stdin.resume();
+
   console.log('✅ QR Scanner initialized - ready for automated processing');
+}
+
+function processQRInput(input) {
+  if (!state.qrScanEnabled) return;
+  
+  const qrCode = input.trim();
+  
+  // Validate QR code format
+  if (qrCode.length >= CONFIG.qr.minLength && 
+      qrCode.length <= CONFIG.qr.maxLength &&
+      (/^\d+$/.test(qrCode) || !CONFIG.qr.numericOnly)) {
+    
+    console.log(`\n📱 QR CODE DETECTED: "${qrCode}"\n`);
+    handleQRCode(qrCode);
+  } else if (qrCode.length > 0) {
+    console.log(`❌ Invalid QR format: "${qrCode}" (Length: ${qrCode.length})`);
+    console.log(`   Expected: ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} characters`);
+    if (CONFIG.qr.numericOnly) {
+      console.log('   Must contain only numbers');
+    }
+  }
 }
 
 async function handleQRCode(qrCode) {
@@ -353,6 +387,7 @@ async function endSession() {
   
   state.sessionActive = false;
   state.autoCycleEnabled = false;
+  state.qrScanEnabled = true; // Re-enable QR scanning
   
   if (state.sessionTimer) {
     clearTimeout(state.sessionTimer);
