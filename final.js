@@ -1,18 +1,24 @@
-// RVM Agent v8.0 + QR Code Automation
-// Your working code + QR scanning functionality
-// QR scan → Auto gate open → Full cycle automation
-// Save as: agent-v8-qr.js
+// RVM Agent v8.3 - Simplified Flow (RECOMMENDED)
+// Agent handles gate opening immediately after backend validation
+// No waiting for MQTT command - faster and simpler!
+// Save as: agent-v8.3-simplified.js
 
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
-const readline = require('readline');  // NEW: For QR scanner
+const readline = require('readline');
 
 // ======= CONFIGURATION =======
 const CONFIG = {
   device: {
     id: 'RVM-3101'
+  },
+  
+  backend: {
+    url: 'https://rebit-api.ceewen.xyz',
+    validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
+    timeout: 10000
   },
   
   local: {
@@ -33,15 +39,14 @@ const CONFIG = {
       aiResult: 'rvm/RVM-3101/ai/result',
       weightResult: 'rvm/RVM-3101/weight/result',
       status: 'rvm/RVM-3101/status',
-      qrScanned: 'rvm/RVM-3101/qr/scanned'  // NEW: QR scan topic
+      qrScanned: 'rvm/RVM-3101/qr/scanned'
     }
   },
   
-  // NEW: QR Scanner Configuration
   qr: {
     minLength: 8,
     maxLength: 20,
-    sessionTimeout: 30000  // 30 seconds timeout if no object detected
+    sessionTimeout: 30000
   },
   
   motors: {
@@ -93,9 +98,8 @@ const state = {
   calibrationAttempts: 0,
   ws: null,
   sessionId: null,
-  
-  // NEW: QR & Session Management
   currentUserId: null,
+  currentUserData: null,
   qrScanTimestamp: null,
   sessionActive: false,
   sessionTimer: null
@@ -105,13 +109,13 @@ const state = {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const generateSessionId = () => `${CONFIG.device.id}-${Date.now()}`;
 
-// ======= NEW: QR SCANNER SETUP =======
+// ======= QR SCANNER SETUP =======
 function setupQRScanner() {
   console.log('\n========================================');
   console.log('📱 QR SCANNER READY');
   console.log('========================================');
   console.log(`⌨️  Listening for QR codes (${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} chars)`);
-  console.log('🎯 Scan QR code to start automated cycle');
+  console.log('🎯 Scan QR code to validate and start');
   console.log('========================================\n');
   
   const rl = readline.createInterface({
@@ -123,7 +127,6 @@ function setupQRScanner() {
   rl.on('line', async (input) => {
     const qrCode = input.trim();
     
-    // Validate QR code
     if (qrCode.length >= CONFIG.qr.minLength && 
         qrCode.length <= CONFIG.qr.maxLength) {
       
@@ -131,21 +134,96 @@ function setupQRScanner() {
       await handleQRScan(qrCode);
       
     } else {
-      console.log(`❌ Invalid QR: "${qrCode}" (length: ${qrCode.length})`);
+      console.log(`❌ Invalid QR length: "${qrCode}" (${qrCode.length} chars)`);
     }
   });
 }
 
-// ======= NEW: QR SCAN HANDLER =======
+// ======= BACKEND QR VALIDATION =======
+async function validateQRWithBackend(sessionCode) {
+  const url = `${CONFIG.backend.url}${CONFIG.backend.validateEndpoint}`;
+  
+  console.log('🔐 VALIDATING QR WITH BACKEND');
+  console.log(`   URL: ${url}`);
+  console.log(`   Code: ${sessionCode}`);
+  
+  try {
+    const response = await axios.post(
+      url,
+      { sessionCode },
+      {
+        timeout: CONFIG.backend.timeout,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    
+    console.log(`   Response: ${response.status}`);
+    
+    if (response.data && response.data.success) {
+      console.log('   ✅ VALIDATION SUCCESS!\n');
+      return {
+        valid: true,
+        user: response.data.user || {},
+        data: response.data
+      };
+    } else {
+      console.log('   ❌ VALIDATION FAILED');
+      console.log(`   Error: ${response.data?.error || 'Unknown'}\n`);
+      return { valid: false, error: response.data?.error || 'Invalid QR' };
+    }
+    
+  } catch (error) {
+    console.error('   ❌ BACKEND ERROR');
+    
+    if (error.response) {
+      const errorMsg = error.response.data?.error || error.response.statusText;
+      console.error(`   Status: ${error.response.status}`);
+      console.error(`   Error: ${errorMsg}\n`);
+      return { valid: false, error: errorMsg };
+    }
+    
+    console.error(`   ${error.message}\n`);
+    
+    if (error.code === 'ECONNREFUSED') {
+      console.error('   Backend not reachable!');
+    } else if (error.code === 'ETIMEDOUT') {
+      console.error('   Backend timeout!');
+    }
+    
+    return { valid: false, error: error.message };
+  }
+}
+
+// ======= SIMPLIFIED QR HANDLER =====
 async function handleQRScan(qrCode) {
   const timestamp = new Date().toISOString();
   
   console.log('╔════════════════════════════════════════╗');
-  console.log('║   🎯 STARTING AUTOMATED CYCLE          ║');
+  console.log('║   🎯 QR CODE VALIDATION STARTED        ║');
   console.log('╚════════════════════════════════════════╝');
-  console.log(`👤 User ID: ${qrCode}`);
+  console.log(`📱 Session Code: ${qrCode}`);
   console.log(`⏰ Time: ${new Date().toLocaleTimeString()}`);
-  console.log(`🔧 Module ID: ${state.moduleId || 'CHECKING...'}`);
+  console.log('════════════════════════════════════════\n');
+  
+  // STEP 1: Validate with backend
+  const validation = await validateQRWithBackend(qrCode);
+  
+  if (!validation.valid) {
+    console.log('╔════════════════════════════════════════╗');
+    console.log('║       ❌ INVALID QR CODE! ❌          ║');
+    console.log('╚════════════════════════════════════════╝');
+    console.log(`Error: ${validation.error}`);
+    console.log('Gate remains CLOSED');
+    console.log('════════════════════════════════════════\n');
+    return;
+  }
+  
+  console.log('╔════════════════════════════════════════╗');
+  console.log('║    ✅ QR VALIDATED! STARTING NOW...   ║');
+  console.log('╚════════════════════════════════════════╝');
+  console.log(`👤 User: ${validation.user.name || qrCode}`);
+  console.log(`📧 Email: ${validation.user.email || 'N/A'}`);
+  console.log(`💰 Points: ${validation.user.currentPoints || 0}`);
   console.log('════════════════════════════════════════\n');
   
   // Verify Module ID
@@ -169,44 +247,36 @@ async function handleQRScan(qrCode) {
     }
   }
   
-  // Store session info
+  // STEP 2: Store session info
   state.currentUserId = qrCode;
+  state.currentUserData = validation.user;
   state.qrScanTimestamp = timestamp;
   state.sessionId = generateSessionId();
   state.sessionActive = true;
+  state.autoCycleEnabled = true; // Enable auto mode
   
-  console.log(`✅ Session ID: ${state.sessionId}\n`);
+  console.log(`✅ Session ID: ${state.sessionId}`);
+  console.log('✅ Auto mode enabled\n');
   
-  // Publish QR scan to MQTT
+  // Publish QR scan event to MQTT (for backend tracking)
   mqttClient.publish(
     CONFIG.mqtt.topics.qrScanned,
     JSON.stringify({
       userId: qrCode,
       deviceId: CONFIG.device.id,
       sessionId: state.sessionId,
+      userData: validation.user,
       timestamp: timestamp
     }),
     { qos: 1 }
   );
   
-  console.log('📤 QR scan published to MQTT\n');
-  
-  // START AUTOMATION SEQUENCE
+  // STEP 3: START AUTOMATION IMMEDIATELY
   try {
     console.log('🚀 Starting automation sequence...\n');
     
-    // Step 1: Enable auto mode
-    console.log('▶️  [1/4] Enabling auto mode...');
-    state.autoCycleEnabled = true;
-    mqttClient.publish(
-      CONFIG.mqtt.topics.autoControl,
-      JSON.stringify({ enabled: true })
-    );
-    await delay(500);
-    console.log('    ✅ Auto mode enabled\n');
-    
-    // Step 2: Reset motors
-    console.log('▶️  [2/4] Resetting motors...');
+    // Reset motors
+    console.log('▶️  [1/3] Resetting motors...');
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await delay(200);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
@@ -217,20 +287,21 @@ async function handleQRScan(qrCode) {
     await delay(2000);
     console.log('    ✅ Motors reset\n');
     
-    // Step 3: Open gate
-    console.log('▶️  [3/4] Opening gate...');
+    // Open gate IMMEDIATELY (no waiting for MQTT!)
+    console.log('▶️  [2/3] Opening gate...');
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
-    console.log('    ✅ Gate opened\n');
+    console.log('    ✅ Gate OPEN!\n');
     
-    // Step 4: Start session timeout
-    console.log('▶️  [4/4] Waiting for object...');
+    // Start session timeout
+    console.log('▶️  [3/3] Session timeout started...');
     startSessionTimeout();
     console.log('    ✅ Ready for item\n');
     
     console.log('╔════════════════════════════════════════╗');
     console.log('║      🎉 INSERT BOTTLE/CAN NOW! 🎉     ║');
-    console.log('╚════════════════════════════════════════╝\n');
+    console.log('╚════════════════════════════════════════╝');
+    console.log(`⏳ Waiting for item (${CONFIG.qr.sessionTimeout / 1000}s timeout)...\n`);
     
   } catch (error) {
     console.error('╔════════════════════════════════════════╗');
@@ -243,16 +314,12 @@ async function handleQRScan(qrCode) {
   }
 }
 
-// ======= NEW: SESSION TIMEOUT =======
+// ======= SESSION TIMEOUT =======
 function startSessionTimeout() {
-  console.log(`⏳ Session timeout: ${CONFIG.qr.sessionTimeout / 1000} seconds\n`);
-  
-  // Clear any existing timer
   if (state.sessionTimer) {
     clearTimeout(state.sessionTimer);
   }
   
-  // Set new timeout
   state.sessionTimer = setTimeout(async () => {
     if (state.sessionActive && !state.cycleInProgress) {
       console.log('\n⏰ SESSION TIMEOUT - No object detected');
@@ -262,20 +329,18 @@ function startSessionTimeout() {
   }, CONFIG.qr.sessionTimeout);
 }
 
-// ======= NEW: END SESSION =======
+// ======= END SESSION =======
 async function endSession() {
   console.log('🔚 Ending session...\n');
   
   state.sessionActive = false;
   state.autoCycleEnabled = false;
   
-  // Clear timeout
   if (state.sessionTimer) {
     clearTimeout(state.sessionTimer);
     state.sessionTimer = null;
   }
   
-  // Close gate
   try {
     if (state.moduleId) {
       await executeCommand('closeGate');
@@ -285,8 +350,8 @@ async function endSession() {
     console.error('❌ Error closing gate:', error.message);
   }
   
-  // Reset session data
   state.currentUserId = null;
+  state.currentUserData = null;
   state.qrScanTimestamp = null;
   state.sessionId = null;
   
@@ -402,7 +467,6 @@ async function executeCommand(action, params = {}) {
 async function executeAutoCycle() {
   const cycleStartTime = Date.now();
   
-  // Clear session timeout during cycle
   if (state.sessionTimer) {
     clearTimeout(state.sessionTimer);
     state.sessionTimer = null;
@@ -412,32 +476,28 @@ async function executeAutoCycle() {
   console.log('║         🚀 PROCESSING ITEM 🚀         ║');
   console.log('╚════════════════════════════════════════╝');
   console.log(`📋 Session: ${state.sessionId}`);
-  console.log(`👤 User: ${state.currentUserId || 'N/A'}`);  // NEW
+  console.log(`👤 User: ${state.currentUserData?.name || state.currentUserId || 'N/A'}`);
   console.log(`📍 Material: ${state.aiResult.materialType}`);
   console.log(`📊 Confidence: ${state.aiResult.matchRate}%`);
   console.log(`⚖️  Weight: ${state.weight.weight}g`);
   console.log('════════════════════════════════════════\n');
   
   try {
-    // Step 1: Close gate during processing
     console.log('▶️  [1/8] Closing gate...');
     await executeCommand('closeGate');
     await delay(CONFIG.timing.gateOperation);
     
-    // Step 2: Belt to weight position
     console.log('▶️  [2/8] Moving to weight...');
     await executeCommand('customMotor', CONFIG.motors.belt.toWeight);
     await delay(CONFIG.timing.beltToWeight);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     
-    // Step 3: Belt to stepper position
     console.log('▶️  [3/8] Moving to stepper...');
     await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await delay(CONFIG.timing.positionSettle);
     
-    // Step 4: Stepper dump
     console.log('▶️  [4/8] Dumping to crusher...');
     const position = state.aiResult.materialType === 'METAL_CAN' 
       ? CONFIG.motors.stepper.positions.metalCan 
@@ -445,24 +505,20 @@ async function executeAutoCycle() {
     await executeCommand('stepperMotor', { position });
     await delay(CONFIG.timing.stepperRotate);
     
-    // Step 5: Compactor
     console.log('▶️  [5/8] Crushing...');
     await executeCommand('customMotor', CONFIG.motors.compactor.start);
     await delay(CONFIG.timing.compactor);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     
-    // Step 6: Belt return
     console.log('▶️  [6/8] Returning belt...');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     
-    // Step 7: Stepper reset
     console.log('▶️  [7/8] Resetting stepper...');
     await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await delay(CONFIG.timing.stepperReset);
     
-    // Step 8: Finalize
     console.log('▶️  [8/8] Finalizing...');
     
     const cycleTime = Math.round((Date.now() - cycleStartTime) / 1000);
@@ -473,11 +529,10 @@ async function executeAutoCycle() {
     console.log(`⏱️  Duration: ${cycleTime} seconds`);
     console.log('════════════════════════════════════════\n');
     
-    // Publish complete transaction data
     const transactionData = {
       sessionId: state.sessionId,
       deviceId: CONFIG.device.id,
-      userId: state.currentUserId,  // NEW: Include user ID
+      userId: state.currentUserId,
       materialType: state.aiResult.materialType,
       weight: state.weight.weight,
       rawWeight: state.weight.rawWeight,
@@ -485,7 +540,7 @@ async function executeAutoCycle() {
       aiClassName: state.aiResult.className,
       aiTaskId: state.aiResult.taskId,
       cycleTime: cycleTime,
-      qrScanTimestamp: state.qrScanTimestamp,  // NEW
+      qrScanTimestamp: state.qrScanTimestamp,
       timestamp: new Date().toISOString(),
       status: 'success'
     };
@@ -498,12 +553,10 @@ async function executeAutoCycle() {
     
     console.log('📤 Transaction published to MQTT\n');
     
-    // Reset state
     state.cycleInProgress = false;
     state.aiResult = null;
     state.weight = null;
     
-    // End session after successful cycle
     await endSession();
     
   } catch (error) {
@@ -513,13 +566,12 @@ async function executeAutoCycle() {
     console.error('Error:', error.message);
     console.error('════════════════════════════════════════\n');
     
-    // Publish failure
     mqttClient.publish(
       CONFIG.mqtt.topics.cycleComplete,
       JSON.stringify({
         sessionId: state.sessionId,
         deviceId: CONFIG.device.id,
-        userId: state.currentUserId,  // NEW
+        userId: state.currentUserId,
         status: 'failed',
         error: error.message,
         timestamp: new Date().toISOString()
@@ -527,7 +579,6 @@ async function executeAutoCycle() {
       { qos: 1 }
     );
     
-    // Emergency stop
     console.log('🛑 Emergency stop...');
     try {
       await executeCommand('customMotor', CONFIG.motors.belt.stop);
@@ -543,7 +594,6 @@ async function executeAutoCycle() {
     state.aiResult = null;
     state.weight = null;
     
-    // End session after failure
     await endSession();
   }
 }
@@ -573,14 +623,12 @@ function connectWebSocket() {
     try {
       const message = JSON.parse(data);
       
-      // Module ID response
       if (message.function === '01') {
         state.moduleId = message.moduleId || message.data;
         console.log(`✅ Module ID: ${state.moduleId}`);
         return;
       }
       
-      // AI Photo result
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
@@ -600,7 +648,6 @@ function connectWebSocket() {
           JSON.stringify(state.aiResult)
         );
         
-        // Check if should proceed (only if session active)
         if (state.autoCycleEnabled && state.sessionActive && 
             state.aiResult.materialType !== 'UNKNOWN') {
           const threshold = CONFIG.detection[state.aiResult.materialType];
@@ -616,7 +663,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Weight result
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
@@ -636,7 +682,6 @@ function connectWebSocket() {
           JSON.stringify(state.weight)
         );
         
-        // Calibrate if needed
         if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
           state.calibrationAttempts++;
           console.log(`⚠️ Calibrating weight (${state.calibrationAttempts}/2)...\n`);
@@ -649,7 +694,6 @@ function connectWebSocket() {
         
         if (state.weight.weight > 0) state.calibrationAttempts = 0;
         
-        // Start cycle if ready (only if session active)
         if (state.autoCycleEnabled && state.sessionActive && state.aiResult && 
             state.weight.weight > 1 && !state.cycleInProgress) {
           state.cycleInProgress = true;
@@ -658,7 +702,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Object detection
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         if (code === 4 && state.autoCycleEnabled && state.sessionActive && 
@@ -711,7 +754,6 @@ mqttClient.on('connect', () => {
   
   connectWebSocket();
   
-  // NEW: Setup QR scanner after connections ready
   setTimeout(() => {
     requestModuleId();
     setupQRScanner();
@@ -722,10 +764,10 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
-    // Auto mode control (keep for backward compatibility)
+    // Manual auto control (kept for backward compatibility)
     if (topic === CONFIG.mqtt.topics.autoControl) {
       state.autoCycleEnabled = payload.enabled === true;
-      console.log(`🤖 Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
+      console.log(`🤖 Manual auto mode command: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
       
       if (state.autoCycleEnabled && state.moduleId) {
         await executeCommand('openGate');
@@ -735,7 +777,6 @@ mqttClient.on('message', async (topic, message) => {
       return;
     }
     
-    // Manual commands
     if (topic === CONFIG.mqtt.topics.commands) {
       console.log(`📩 Command: ${payload.action}`);
       
@@ -768,7 +809,6 @@ mqttClient.on('message', async (topic, message) => {
   }
 });
 
-// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n⏹️  Shutting down...');
   
@@ -789,16 +829,16 @@ process.on('SIGINT', () => {
 
 // ======= STARTUP =======
 console.log('╔════════════════════════════════════════╗');
-console.log('║   RVM AGENT v8.0 + QR AUTOMATION      ║');
+console.log('║   RVM AGENT v8.3 - SIMPLIFIED FLOW    ║');
 console.log('╚════════════════════════════════════════╝');
 console.log(`📱 Device: ${CONFIG.device.id}`);
+console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('════════════════════════════════════════');
-console.log('🎯 WORKFLOW:');
-console.log('   1. Scan QR code');
-console.log('   2. Gate opens automatically');
-console.log('   3. Insert bottle/can');
-console.log('   4. AI detects + weighs');
-console.log('   5. Auto-processing + crushing');
-console.log('   6. Session ends');
+console.log('🎯 SIMPLIFIED WORKFLOW:');
+console.log('   1. Scan QR → Validate with backend');
+console.log('   2. If valid → Gate opens IMMEDIATELY');
+console.log('   3. No waiting for MQTT!');
+console.log('   4. Insert item → Auto processing');
+console.log('   5. Transaction saved → Done');
 console.log('════════════════════════════════════════');
 console.log('⏳ Starting system...\n');
