@@ -1,25 +1,34 @@
+// RVM Agent v9.6 - WEB FRONTEND INTEGRATION
+// Save as: agent-v9.6-frontend-integration.js
+
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
+const readline = require('readline');
+const http = require('http');
 
+// ======= CONFIGURATION =======
 const CONFIG = {
   device: {
     id: 'RVM-3101'
   },
   
+  // Backend API Configuration
   backend: {
     url: 'https://rebit-api.ceewen.xyz',
     validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
     timeout: 10000
   },
   
+  // Local Hardware API
   local: {
     baseUrl: 'http://localhost:8081',
     wsUrl: 'ws://localhost:8081/websocket/qazwsx1234',
     timeout: 10000
   },
   
+  // MQTT Configuration
   mqtt: {
     brokerUrl: 'mqtts://mqtt.ceewen.xyz:8883',
     username: 'mqttuser',
@@ -36,6 +45,13 @@ const CONFIG = {
     }
   },
   
+  // WebSocket Server for Frontend
+  frontend: {
+    port: 8082,
+    path: '/agent'
+  },
+  
+  // Motor Configuration
   motors: {
     belt: {
       toWeight: { motorId: "02", type: "02" },
@@ -53,12 +69,14 @@ const CONFIG = {
     }
   },
   
+  // Detection Thresholds
   detection: {
     METAL_CAN: 0.22,
     PLASTIC_BOTTLE: 0.30,
     GLASS: 0.25
   },
   
+  // Timing (milliseconds)
   timing: {
     beltToWeight: 3000,
     beltToStepper: 4000,
@@ -71,11 +89,13 @@ const CONFIG = {
     autoPhotoDelay: 5000
   },
   
+  // Weight Calibration
   weight: {
     coefficients: { 1: 988, 2: 942, 3: 942, 4: 942 }
   }
 };
 
+// ======= STATE =======
 const state = {
   moduleId: null,
   aiResult: null,
@@ -83,157 +103,594 @@ const state = {
   autoCycleEnabled: false,
   cycleInProgress: false,
   calibrationAttempts: 0,
-  ws: null,
+  ws: null, // Hardware WebSocket
+  frontendWs: null, // Frontend WebSocket
   sessionId: null,
+  
+  // QR specific
+  qrScanEnabled: true,
   currentUserId: null,
   currentUserData: null,
-  autoPhotoTimer: null
+  qrScanTimer: null,
+  autoPhotoTimer: null,
+  isProcessingQR: false
 };
 
+// ======= UTILITY =======
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const generateSessionId = () => `${CONFIG.device.id}-${Date.now()}`;
 
+// ======= BACKEND QR VALIDATION =======
+async function validateQRWithBackend(sessionCode) {
+  const url = `${CONFIG.backend.url}${CONFIG.backend.validateEndpoint}`;
+  
+  console.log('🔐 VALIDATING QR WITH BACKEND');
+  console.log(`   URL: ${url}`);
+  console.log(`   Code: ${sessionCode}`);
+  
+  try {
+    const response = await axios.post(
+      url,
+      { sessionCode },
+      {
+        timeout: CONFIG.backend.timeout,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    
+    console.log(`   Response: ${response.status}`);
+    
+    if (response.data && response.data.success) {
+      console.log('   ✅ VALIDATION SUCCESS!\n');
+      return {
+        valid: true,
+        user: response.data.user || {},
+        data: response.data
+      };
+    } else {
+      console.log('   ❌ VALIDATION FAILED');
+      console.log(`   Error: ${response.data?.error || 'Unknown'}\n`);
+      return { valid: false, error: response.data?.error || 'Invalid QR' };
+    }
+    
+  } catch (error) {
+    console.error('   ❌ BACKEND ERROR');
+    
+    if (error.response) {
+      const errorMsg = error.response.data?.error || error.response.statusText;
+      console.error(`   Status: ${error.response.status}`);
+      console.error(`   Error: ${errorMsg}\n`);
+      return { valid: false, error: errorMsg };
+    }
+    
+    console.error(`   ${error.message}\n`);
+    return { valid: false, error: error.message };
+  }
+}
+
+// ======= FRONTEND WEBSOCKET SERVER =======
+function setupFrontendWebSocketServer() {
+  const server = http.createServer();
+  const wss = new WebSocket.Server({ server });
+  
+  wss.on('connection', (ws) => {
+    console.log('✅ Frontend WebSocket connected');
+    state.frontendWs = ws;
+    
+    // Send connection confirmation
+    sendToFrontend({
+      type: 'agent_connected',
+      status: 'connected',
+      deviceId: CONFIG.device.id,
+      timestamp: new Date().toISOString()
+    });
+    
+    ws.on('message', async (data) => {
+      try {
+        const message = JSON.parse(data);
+        console.log('📱 Frontend message received:', message);
+        
+        // Handle QR validation from frontend
+        if (message.type === 'qr_validated' && message.startAutoCycle) {
+          console.log('🚀 Frontend QR validated - Starting automation');
+          await handleFrontendQRCode(message);
+        }
+        
+        // Handle other frontend commands
+        if (message.type === 'manual_operation') {
+          console.log('🔧 Manual operation requested:', message.action);
+          await handleManualOperation(message);
+        }
+        
+      } catch (error) {
+        console.error('❌ Frontend message error:', error.message);
+      }
+    });
+    
+    ws.on('close', () => {
+      console.log('⚠️ Frontend WebSocket disconnected');
+      state.frontendWs = null;
+    });
+    
+    ws.on('error', (error) => {
+      console.error('❌ Frontend WebSocket error:', error.message);
+      state.frontendWs = null;
+    });
+  });
+  
+  server.listen(CONFIG.frontend.port, () => {
+    console.log(`✅ Frontend WebSocket server running on port ${CONFIG.frontend.port}`);
+    console.log(`   Frontend can connect to: ws://localhost:${CONFIG.frontend.port}${CONFIG.frontend.path}`);
+  });
+  
+  return wss;
+}
+
+// ======= FRONTEND COMMUNICATION =======
+function sendToFrontend(data) {
+  if (state.frontendWs && state.frontendWs.readyState === WebSocket.OPEN) {
+    state.frontendWs.send(JSON.stringify(data));
+    console.log('📤 Sent to frontend:', data.type);
+    return true;
+  } else {
+    console.warn('⚠️ Frontend not connected, cannot send data');
+    return false;
+  }
+}
+
+// ======= HANDLE FRONTEND QR CODE =======
+async function handleFrontendQRCode(message) {
+  if (state.isProcessingQR) {
+    console.log('⏳ Already processing QR, please wait...');
+    sendToFrontend({
+      type: 'agent_busy',
+      message: 'Agent is currently processing another QR code',
+      timestamp: new Date().toISOString()
+    });
+    return;
+  }
+  
+  state.isProcessingQR = true;
+  const { sessionCode, userId, userName, userEmail } = message;
+  
+  console.log('\n╔════════════════════════════════════════╗');
+  console.log('║   🎯 FRONTEND QR CODE RECEIVED        ║');
+  console.log('╚════════════════════════════════════════╝');
+  console.log(`📱 Session Code: ${sessionCode}`);
+  console.log(`👤 User: ${userName}`);
+  console.log(`📧 Email: ${userEmail}`);
+  console.log(`⏰ Time: ${new Date().toLocaleTimeString()}`);
+  console.log('════════════════════════════════════════\n');
+  
+  // Notify frontend
+  sendToFrontend({
+    type: 'automation_starting',
+    message: 'Starting RVM automation sequence',
+    sessionCode: sessionCode,
+    timestamp: new Date().toISOString()
+  });
+  
+  // Verify Module ID
+  if (!state.moduleId) {
+    console.log('⚠️ Module ID not available, requesting...\n');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'initializing',
+      message: 'Getting module ID from hardware',
+      timestamp: new Date().toISOString()
+    });
+    
+    for (let i = 0; i < 5; i++) {
+      await requestModuleId();
+      await delay(1000);
+      
+      if (state.moduleId) {
+        console.log(`✅ Module ID: ${state.moduleId}\n`);
+        break;
+      }
+    }
+    
+    if (!state.moduleId) {
+      console.error('❌ Cannot start - Module ID unavailable\n');
+      sendToFrontend({
+        type: 'error',
+        message: 'Hardware module not available',
+        timestamp: new Date().toISOString()
+      });
+      state.isProcessingQR = false;
+      return;
+    }
+  }
+  
+  // Store session info
+  state.currentUserId = sessionCode;
+  state.currentUserData = {
+    id: userId,
+    name: userName,
+    email: userEmail
+  };
+  state.sessionId = generateSessionId();
+  
+  console.log(`✅ Session ID: ${state.sessionId}\n`);
+  
+  // Publish QR scan event to MQTT
+  mqttClient.publish(
+    CONFIG.mqtt.topics.qrScan,
+    JSON.stringify({
+      deviceId: CONFIG.device.id,
+      userId: sessionCode,
+      userData: state.currentUserData,
+      timestamp: new Date().toISOString(),
+      sessionId: state.sessionId,
+      source: 'frontend'
+    }),
+    { qos: 1 }
+  );
+  
+  // START AUTOMATION
+  await startAutomation();
+}
+
+// ======= START AUTOMATION =======
+async function startAutomation() {
+  try {
+    console.log('🚀 STARTING AUTOMATION SEQUENCE\n');
+    
+    sendToFrontend({
+      type: 'status_update',
+      status: 'starting',
+      message: 'Starting automation sequence',
+      timestamp: new Date().toISOString()
+    });
+    
+    // Step 1: Enable auto mode
+    state.autoCycleEnabled = true;
+    mqttClient.publish(CONFIG.mqtt.topics.autoControl, JSON.stringify({ enabled: true }));
+    console.log('✅ Auto mode enabled\n');
+    
+    sendToFrontend({
+      type: 'status_update',
+      status: 'resetting',
+      message: 'Resetting system motors',
+      timestamp: new Date().toISOString()
+    });
+    
+    // Step 2: Reset motors
+    console.log('🔧 Resetting system...');
+    await executeCommand('customMotor', CONFIG.motors.belt.stop);
+    await executeCommand('customMotor', CONFIG.motors.compactor.stop);
+    await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
+    await delay(2000);
+    console.log('✅ System reset complete\n');
+    
+    sendToFrontend({
+      type: 'status_update',
+      status: 'opening_gate',
+      message: 'Opening gate for item placement',
+      timestamp: new Date().toISOString()
+    });
+    
+    // Step 3: Open gate
+    console.log('🚪 Opening gate...');
+    await executeCommand('openGate');
+    await delay(CONFIG.timing.gateOperation);
+    console.log('✅ Gate opened - Ready for items!\n');
+    
+    sendToFrontend({
+      type: 'status_update',
+      status: 'waiting_item',
+      message: 'Gate opened - Please place your item',
+      timestamp: new Date().toISOString()
+    });
+    
+    console.log('👁️  Waiting for object detection...');
+    console.log('⏰ Auto photo in 5 seconds if no detection...\n');
+    
+    // AUTO PHOTO TIMER
+    state.autoPhotoTimer = setTimeout(async () => {
+      if (state.autoCycleEnabled && !state.cycleInProgress && !state.aiResult) {
+        console.log('⏰ AUTO PHOTO TRIGGERED - Taking photo now...\n');
+        sendToFrontend({
+          type: 'status_update',
+          status: 'taking_photo',
+          message: 'Auto photo triggered - Detecting item',
+          timestamp: new Date().toISOString()
+        });
+        await executeCommand('takePhoto');
+      }
+    }, CONFIG.timing.autoPhotoDelay);
+    
+  } catch (error) {
+    console.error('❌ Automation failed:', error.message);
+    sendToFrontend({
+      type: 'error',
+      message: `Automation failed: ${error.message}`,
+      timestamp: new Date().toISOString()
+    });
+    resetSystemForNextUser();
+  }
+}
+
+// ======= MATERIAL DETECTION =======
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
   const probability = aiData.probability || 0;
-
-  if (className.includes('can') || className.includes('metal')) {
-    return probability >= CONFIG.detection.METAL_CAN ? 'METAL_CAN' : 'UNKNOWN';
-  }
-  if (className.includes('bottle') || className.includes('plastic') || className.includes('pet')) {
-    return probability >= CONFIG.detection.PLASTIC_BOTTLE ? 'PLASTIC_BOTTLE' : 'UNKNOWN';
-  }
-  if (className.includes('glass')) {
-    return probability >= CONFIG.detection.GLASS ? 'GLASS' : 'UNKNOWN';
+  
+  let materialType = 'UNKNOWN';
+  let threshold = 1.0;
+  
+  if (className.includes('易拉罐') || className.includes('metal') || className.includes('can') || className.includes('铝')) {
+    materialType = 'METAL_CAN';
+    threshold = CONFIG.detection.METAL_CAN;
+  } else if (className.includes('pet') || className.includes('plastic') || className.includes('瓶') || className.includes('bottle')) {
+    materialType = 'PLASTIC_BOTTLE';
+    threshold = CONFIG.detection.PLASTIC_BOTTLE;
+  } else if (className.includes('玻璃') || className.includes('glass')) {
+    materialType = 'GLASS';
+    threshold = CONFIG.detection.GLASS;
   }
   
-  return 'UNKNOWN';
+  const confidencePercent = Math.round(probability * 100);
+  const thresholdPercent = Math.round(threshold * 100);
+  
+  if (materialType !== 'UNKNOWN' && probability < threshold) {
+    console.log(`⚠️ ${materialType} detected but confidence too low (${confidencePercent}% < ${thresholdPercent}%)`);
+    return 'UNKNOWN';
+  }
+  
+  if (materialType !== 'UNKNOWN') {
+    console.log(`✅ ${materialType} detected (${confidencePercent}%)`);
+  }
+  
+  return materialType;
 }
 
+// ======= HARDWARE COMMANDS =======
 async function executeCommand(action, params = {}) {
-  if (!state.moduleId) {
-    console.log('⚠️ No module ID');
-    return;
+  const deviceType = 1;
+  
+  if (!state.moduleId && action !== 'getModuleId') {
+    throw new Error('Module ID not available');
   }
-
-  const moduleId = '05';
-  let endpoint = '';
-  let body = {};
-
+  
+  let apiUrl, apiPayload;
+  
   switch (action) {
     case 'openGate':
-      endpoint = '/system/serial/motorSelect';
-      body = { moduleId, motorId: '01', type: '03', deviceType: 1 };
-      await delay(CONFIG.timing.gateOperation);
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
+      apiPayload = { moduleId: state.moduleId, motorId: '01', type: '03', deviceType };
       break;
-
     case 'closeGate':
-      endpoint = '/system/serial/motorSelect';
-      body = { moduleId, motorId: '01', type: '00', deviceType: 1 };
-      await delay(CONFIG.timing.gateOperation);
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
+      apiPayload = { moduleId: state.moduleId, motorId: '01', type: '00', deviceType };
       break;
-
-    case 'takePhoto':
-      endpoint = '/system/camera/process';
-      break;
-
     case 'getWeight':
-      endpoint = '/system/serial/getWeight';
-      body = { moduleId: '06', type: '00' };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/getWeight`;
+      apiPayload = { moduleId: state.moduleId, type: '00' };
       break;
-
     case 'calibrateWeight':
-      endpoint = '/system/serial/weightCalibration';
-      body = { moduleId: '07', type: '00' };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/weightCalibration`;
+      apiPayload = { moduleId: state.moduleId, type: '00' };
       break;
-
+    case 'takePhoto':
+      apiUrl = `${CONFIG.local.baseUrl}/system/camera/process`;
+      apiPayload = {};
+      break;
     case 'stepperMotor':
-      endpoint = '/system/serial/stepMotorSelect';
-      body = { moduleId: '0F', type: params.position || '01', deviceType: 1 };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/stepMotorSelect`;
+      apiPayload = { moduleId: CONFIG.motors.stepper.moduleId, id: params.position, type: params.position, deviceType };
       break;
-
     case 'customMotor':
-      endpoint = '/system/serial/motorSelect';
-      body = { moduleId, ...params, deviceType: 1 };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
+      apiPayload = { moduleId: state.moduleId, motorId: params.motorId, type: params.type, deviceType };
       break;
-
     default:
-      console.log(`❌ Unknown: ${action}`);
-      return;
+      throw new Error(`Unknown action: ${action}`);
   }
-
-  try {
-    await axios.post(`${CONFIG.local.baseUrl}${endpoint}`, body, {
-      timeout: CONFIG.local.timeout,
-      headers: { 'Content-Type': 'application/json' }
-    });
-  } catch (error) {
-    console.error(`❌ ${action} failed:`, error.message);
-  }
+  
+  console.log(`🔧 Executing: ${action}`, params);
+  await axios.post(apiUrl, apiPayload, { timeout: CONFIG.local.timeout, headers: { 'Content-Type': 'application/json' } });
+  
+  if (action === 'takePhoto') await delay(1500);
+  if (action === 'getWeight') await delay(2000);
 }
 
+// ======= AUTO CYCLE =======
 async function executeAutoCycle() {
-  if (!state.aiResult || !state.weight || state.weight.weight <= 1) {
-    console.log('⚠️ Missing data');
-    state.cycleInProgress = false;
-    return;
-  }
-
-  state.sessionId = generateSessionId();
+  const cycleStartTime = Date.now();
   
-  console.log('\n========== AUTO CYCLE START ==========');
-  console.log(`🔹 Material: ${state.aiResult.materialType}`);
-  console.log(`🔹 Weight: ${state.weight.weight}g`);
-  console.log(`🔹 Session: ${state.sessionId}`);
-  console.log('======================================\n');
-
+  console.log('\n========================================');
+  console.log('🚀 PROCESSING ITEM');
+  console.log(`📋 Session: ${state.sessionId}`);
+  console.log(`👤 User: ${state.currentUserData?.name || state.currentUserId || 'N/A'}`);
+  console.log(`📍 Material: ${state.aiResult.materialType}`);
+  console.log(`📊 Confidence: ${state.aiResult.matchRate}%`);
+  console.log(`⚖️ Weight: ${state.weight.weight}g`);
+  console.log('========================================\n');
+  
+  sendToFrontend({
+    type: 'cycle_start',
+    message: 'Starting item processing cycle',
+    materialType: state.aiResult.materialType,
+    confidence: state.aiResult.matchRate,
+    timestamp: new Date().toISOString()
+  });
+  
   try {
+    // Clear auto photo timer
+    if (state.autoPhotoTimer) {
+      clearTimeout(state.autoPhotoTimer);
+      state.autoPhotoTimer = null;
+    }
+    
+    console.log('▶️ Closing gate...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'closing_gate',
+      message: 'Closing gate for processing',
+      timestamp: new Date().toISOString()
+    });
+    await executeCommand('closeGate');
+    await delay(CONFIG.timing.gateOperation);
+    
+    console.log('▶️ Moving to weight position...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'moving_to_weight',
+      message: 'Moving item to weight station',
+      timestamp: new Date().toISOString()
+    });
+    await executeCommand('customMotor', CONFIG.motors.belt.toWeight);
+    await delay(CONFIG.timing.beltToWeight);
+    await executeCommand('customMotor', CONFIG.motors.belt.stop);
+    
+    console.log('▶️ Moving to stepper position...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'moving_to_sorter',
+      message: 'Moving item to sorting station',
+      timestamp: new Date().toISOString()
+    });
     await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await delay(CONFIG.timing.positionSettle);
-
-    if (state.aiResult.materialType === 'METAL_CAN') {
-      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.metalCan });
-      await delay(CONFIG.timing.stepperRotate);
-    } else if (state.aiResult.materialType === 'PLASTIC_BOTTLE') {
-      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.plasticBottle });
-      await delay(CONFIG.timing.stepperRotate);
-    }
-
+    
+    console.log('▶️ Dumping to crusher...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'sorting_item',
+      message: 'Sorting item to appropriate bin',
+      timestamp: new Date().toISOString()
+    });
+    const position = state.aiResult.materialType === 'METAL_CAN' 
+      ? CONFIG.motors.stepper.positions.metalCan 
+      : CONFIG.motors.stepper.positions.plasticBottle;
+    await executeCommand('stepperMotor', { position });
+    await delay(CONFIG.timing.stepperRotate);
+    
+    console.log('▶️ Crushing...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'crushing',
+      message: 'Crushing and compacting item',
+      timestamp: new Date().toISOString()
+    });
+    await executeCommand('customMotor', CONFIG.motors.compactor.start);
+    await delay(CONFIG.timing.compactor);
+    await executeCommand('customMotor', CONFIG.motors.compactor.stop);
+    
+    console.log('▶️ Returning belt...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'returning',
+      message: 'Returning conveyor belt',
+      timestamp: new Date().toISOString()
+    });
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
-
+    
+    console.log('▶️ Resetting stepper...');
+    sendToFrontend({
+      type: 'status_update',
+      status: 'resetting_sorter',
+      message: 'Resetting sorter to home position',
+      timestamp: new Date().toISOString()
+    });
     await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await delay(CONFIG.timing.stepperReset);
-
-    const cycleData = {
+    
+    const cycleTime = Math.round((Date.now() - cycleStartTime) / 1000);
+    
+    console.log('========================================');
+    console.log('✅ ITEM PROCESSED SUCCESSFULLY');
+    console.log(`⏱️  Duration: ${cycleTime} seconds`);
+    console.log('========================================\n');
+    
+    // Publish transaction
+    const transactionData = {
       sessionId: state.sessionId,
       deviceId: CONFIG.device.id,
+      userId: state.currentUserId,
+      userData: state.currentUserData,
       materialType: state.aiResult.materialType,
       weight: state.weight.weight,
-      aiMatchRate: state.aiResult.matchRate,
-      userId: state.currentUserId,
-      timestamp: new Date().toISOString()
+      rawWeight: state.weight.rawWeight,
+      confidence: state.aiResult.matchRate,
+      aiClassName: state.aiResult.className,
+      aiTaskId: state.aiResult.taskId,
+      cycleTime: cycleTime,
+      timestamp: new Date().toISOString(),
+      status: 'success'
     };
-
-    mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(cycleData));
     
-    console.log('✅ CYCLE COMPLETE\n');
-
+    mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(transactionData), { qos: 1 });
+    console.log('📤 Transaction published to MQTT\n');
+    
+    sendToFrontend({
+      type: 'cycle_complete',
+      message: 'Item processing completed successfully',
+      cycleTime: cycleTime,
+      materialType: state.aiResult.materialType,
+      weight: state.weight.weight,
+      timestamp: new Date().toISOString()
+    });
+    
+    // RESET FOR NEXT USER
+    resetSystemForNextUser();
+    
   } catch (error) {
-    console.error('❌ Cycle error:', error.message);
-  } finally {
-    state.cycleInProgress = false;
-    state.aiResult = null;
-    state.weight = null;
-    state.calibrationAttempts = 0;
+    console.error('========================================');
+    console.error('❌ CYCLE FAILED:', error.message);
+    console.error('========================================\n');
+    
+    mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify({
+      sessionId: state.sessionId,
+      deviceId: CONFIG.device.id,
+      userId: state.currentUserId,
+      status: 'failed',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    }), { qos: 1 });
+    
+    sendToFrontend({
+      type: 'cycle_failed',
+      message: `Processing failed: ${error.message}`,
+      timestamp: new Date().toISOString()
+    });
+    
+    await emergencyStop();
+    resetSystemForNextUser();
   }
 }
 
+function resetSystemForNextUser() {
+  state.cycleInProgress = false;
+  state.autoCycleEnabled = false;
+  state.aiResult = null;
+  state.weight = null;
+  state.currentUserId = null;
+  state.currentUserData = null;
+  state.isProcessingQR = false;
+  
+  sendToFrontend({
+    type: 'ready',
+    message: 'System ready for next user',
+    timestamp: new Date().toISOString()
+  });
+  
+  console.log('🔄 SYSTEM RESET COMPLETE - Ready for next user!');
+  console.log('📱 Scan next QR code anytime...\n');
+}
+
 async function emergencyStop() {
-  console.log('🛑 EMERGENCY STOP');
+  console.log('🛑 Emergency stop...');
+  sendToFrontend({
+    type: 'emergency_stop',
+    message: 'Emergency stop activated',
+    timestamp: new Date().toISOString()
+  });
   
   try {
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
@@ -245,71 +702,19 @@ async function emergencyStop() {
   }
 }
 
-function connectWebSocket() {
+// ======= HARDWARE WEBSOCKET =======
+function connectHardwareWebSocket() {
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
   state.ws.on('open', () => {
-    console.log('✅ WebSocket connected');
+    console.log('✅ Hardware WebSocket connected');
     setTimeout(() => requestModuleId(), 1000);
   });
   
   state.ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
-      console.log(`📡 WS: ${message.function || message.type}`);
-      
-      if (message.type === 'qr_validated') {
-        console.log('\n========================================');
-        console.log('✅ QR VALIDATED BY FRONTEND');
-        console.log('========================================');
-        console.log(`👤 User: ${message.userName || 'Unknown'}`);
-        console.log(`🔑 Session: ${message.sessionCode}`);
-        console.log('========================================\n');
-        
-        state.currentUserId = message.userId;
-        state.currentUserData = {
-          name: message.userName,
-          email: message.userEmail,
-          sessionCode: message.sessionCode,
-          timestamp: message.timestamp
-        };
-        
-        if (state.ws && state.ws.readyState === 1) {
-          state.ws.send(JSON.stringify({
-            type: 'ack',
-            message: 'QR received'
-          }));
-        }
-        
-        if (message.startAutoCycle) {
-          state.autoCycleEnabled = true;
-          console.log('🤖 AUTO CYCLE ENABLED');
-          
-          mqttClient.publish(CONFIG.mqtt.topics.qrScan, JSON.stringify({
-            sessionCode: message.sessionCode,
-            userId: message.userId,
-            userName: message.userName,
-            timestamp: message.timestamp,
-            deviceId: CONFIG.device.id
-          }));
-          
-          console.log('🚪 Opening gate...\n');
-          await executeCommand('openGate');
-          
-          console.log('⏱️  Auto photo in 5 seconds...\n');
-          
-          if (state.autoPhotoTimer) {
-            clearTimeout(state.autoPhotoTimer);
-          }
-          
-          state.autoPhotoTimer = setTimeout(() => {
-            console.log('📸 AUTO PHOTO!\n');
-            executeCommand('takePhoto');
-          }, CONFIG.timing.autoPhotoDelay);
-        }
-        
-        return;
-      }
+      console.log(`📡 Hardware message: ${message.function}`, message.data);
       
       if (message.function === '01') {
         state.moduleId = message.moduleId || message.data;
@@ -317,7 +722,9 @@ function connectWebSocket() {
         return;
       }
       
+      // AI Photo result
       if (message.function === 'aiPhoto') {
+        // Clear auto photo timer when we get AI result
         if (state.autoPhotoTimer) {
           clearTimeout(state.autoPhotoTimer);
           state.autoPhotoTimer = null;
@@ -338,20 +745,41 @@ function connectWebSocket() {
         
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
         
+        sendToFrontend({
+          type: 'ai_result',
+          message: `AI detected: ${state.aiResult.materialType}`,
+          materialType: state.aiResult.materialType,
+          confidence: state.aiResult.matchRate,
+          timestamp: new Date().toISOString()
+        });
+        
         if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
           const threshold = CONFIG.detection[state.aiResult.materialType];
           const thresholdPercent = Math.round(threshold * 100);
           
           if (state.aiResult.matchRate >= thresholdPercent) {
             console.log('✅ Proceeding to weight...\n');
+            sendToFrontend({
+              type: 'status_update',
+              status: 'weighing',
+              message: 'Proceeding to weight measurement',
+              timestamp: new Date().toISOString()
+            });
             setTimeout(() => executeCommand('getWeight'), 500);
           } else {
-            console.log(`⚠️ Low confidence (${state.aiResult.matchRate}% < ${thresholdPercent}%)\n`);
+            console.log(`⚠️ Confidence too low (${state.aiResult.matchRate}% < ${thresholdPercent}%)\n`);
+            sendToFrontend({
+              type: 'status_update',
+              status: 'low_confidence',
+              message: 'AI confidence too low, please try again',
+              timestamp: new Date().toISOString()
+            });
           }
         }
         return;
       }
       
+      // Weight result
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
@@ -368,9 +796,22 @@ function connectWebSocket() {
         
         mqttClient.publish(CONFIG.mqtt.topics.weightResult, JSON.stringify(state.weight));
         
+        sendToFrontend({
+          type: 'weight_result',
+          message: `Weight measured: ${state.weight.weight}g`,
+          weight: state.weight.weight,
+          timestamp: new Date().toISOString()
+        });
+        
         if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
           state.calibrationAttempts++;
-          console.log(`⚠️ Calibrating (${state.calibrationAttempts}/2)...\n`);
+          console.log(`⚠️ Calibrating weight (${state.calibrationAttempts}/2)...\n`);
+          sendToFrontend({
+            type: 'status_update',
+            status: 'calibrating',
+            message: 'Calibrating weight sensor',
+            timestamp: new Date().toISOString()
+          });
           setTimeout(async () => {
             await executeCommand('calibrateWeight');
             setTimeout(() => executeCommand('getWeight'), 1000);
@@ -387,35 +828,46 @@ function connectWebSocket() {
         return;
       }
       
+      // Object detection
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         
+        console.log(`🔍 DEVICE STATUS: code=${code}`);
+        
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
-          console.log('👤 OBJECT DETECTED!\n');
+          console.log('👤 OBJECT DETECTED BY SENSOR - TAKING PHOTO!\n');
+          // Clear auto photo timer since we got manual detection
           if (state.autoPhotoTimer) {
             clearTimeout(state.autoPhotoTimer);
             state.autoPhotoTimer = null;
           }
+          sendToFrontend({
+            type: 'status_update',
+            status: 'object_detected',
+            message: 'Object detected - Taking photo',
+            timestamp: new Date().toISOString()
+          });
           setTimeout(() => executeCommand('takePhoto'), 1000);
         }
         return;
       }
       
     } catch (error) {
-      console.error('❌ WS error:', error.message);
+      console.error('❌ Hardware WebSocket error:', error.message);
     }
   });
   
   state.ws.on('close', () => {
-    console.log('⚠️ WS closed, reconnecting...');
-    setTimeout(connectWebSocket, 5000);
+    console.log('⚠️ Hardware WebSocket closed, reconnecting...');
+    setTimeout(connectHardwareWebSocket, 5000);
   });
   
   state.ws.on('error', (error) => {
-    console.error('❌ WS error:', error.message);
+    console.error('❌ Hardware WebSocket error:', error.message);
   });
 }
 
+// ======= MQTT =======
 const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
   username: CONFIG.mqtt.username,
   password: CONFIG.mqtt.password,
@@ -435,7 +887,9 @@ mqttClient.on('connect', () => {
     timestamp: new Date().toISOString()
   }), { retain: true });
   
-  connectWebSocket();
+  connectHardwareWebSocket();
+  setupFrontendWebSocketServer();
+  
   setTimeout(() => {
     requestModuleId();
   }, 2000);
@@ -447,7 +901,7 @@ mqttClient.on('message', async (topic, message) => {
     
     if (topic === CONFIG.mqtt.topics.autoControl) {
       state.autoCycleEnabled = payload.enabled === true;
-      console.log(`🤖 Auto: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
+      console.log(`🤖 Auto mode: ${state.autoCycleEnabled ? 'ON' : 'OFF'}`);
       
       if (state.autoCycleEnabled && state.moduleId) {
         await executeCommand('openGate');
@@ -461,7 +915,7 @@ mqttClient.on('message', async (topic, message) => {
       console.log(`📩 Command: ${payload.action}`);
       
       if (payload.action === 'takePhoto' && state.moduleId) {
-        console.log('📸 MANUAL PHOTO!\n');
+        console.log('📸 MANUAL PHOTO CAPTURE TRIGGERED!\n');
         if (state.autoPhotoTimer) {
           clearTimeout(state.autoPhotoTimer);
           state.autoPhotoTimer = null;
@@ -476,11 +930,11 @@ mqttClient.on('message', async (topic, message) => {
           state.aiResult = {
             matchRate: 100,
             materialType: payload.materialType,
-            className: 'MANUAL',
+            className: 'MANUAL_OVERRIDE',
             taskId: 'manual_' + Date.now(),
             timestamp: new Date().toISOString()
           };
-          console.log(`🔧 Manual: ${payload.materialType}`);
+          console.log(`🔧 Manual override: ${payload.materialType}`);
           
           if (state.autoCycleEnabled) {
             setTimeout(() => executeCommand('getWeight'), 500);
@@ -495,7 +949,7 @@ mqttClient.on('message', async (topic, message) => {
     }
     
   } catch (error) {
-    console.error('❌ MQTT error:', error.message);
+    console.error('❌ MQTT message error:', error.message);
   }
 });
 
@@ -506,7 +960,7 @@ async function requestModuleId() {
       headers: { 'Content-Type': 'application/json' }
     });
   } catch (error) {
-    console.error('❌ Module ID failed:', error.message);
+    console.error('❌ Module ID request failed:', error.message);
   }
 }
 
@@ -519,6 +973,7 @@ function gracefulShutdown() {
   }), { retain: true });
   
   if (state.ws) state.ws.close();
+  if (state.frontendWs) state.frontendWs.close();
   mqttClient.end();
   
   process.exit(0);
@@ -526,11 +981,20 @@ function gracefulShutdown() {
 
 process.on('SIGINT', gracefulShutdown);
 
+// ======= STARTUP =======
 console.log('========================================');
-console.log('🚀 RVM AGENT - FRONTEND QR INTEGRATED');
+console.log('🚀 RVM AGENT v9.6 - FRONTEND INTEGRATION');
+console.log('🔄 FULLY AUTOMATED WITH WEB FRONTEND');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
-console.log('✅ QR scanning via frontend');
+console.log(`🌐 Frontend: ws://localhost:${CONFIG.frontend.port}${CONFIG.frontend.path}`);
 console.log('========================================');
-console.log('⏳ Starting...\n');
+console.log('🎯 FEATURES:');
+console.log('   ✅ Web frontend QR scanning');
+console.log('   ✅ Real-time status updates');
+console.log('   ✅ Full automation sequence');
+console.log('   ✅ Real-time frontend communication');
+console.log('   ✅ MQTT integration');
+console.log('========================================');
+console.log('⏳ Starting system...\n');
