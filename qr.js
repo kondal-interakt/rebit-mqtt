@@ -164,7 +164,6 @@ async function executeCommand(action, params = {}) {
       break;
       
     case 'stepperMotor':
-      // CRITICAL FIX: Include both 'id' and 'type' parameters
       apiUrl = `${CONFIG.local.baseUrl}/system/serial/stepMotorSelect`;
       apiPayload = {
         moduleId: CONFIG.motors.stepper.moduleId,
@@ -218,6 +217,7 @@ async function executeAutoCycle() {
   console.log('\n========================================');
   console.log('🚀 CYCLE START');
   console.log(`📋 Session: ${state.sessionId}`);
+  console.log(`👤 User: ${state.currentUserId}`);
   console.log(`📍 Material: ${state.aiResult.materialType}`);
   console.log(`📊 Confidence: ${state.aiResult.matchRate}%`);
   console.log(`⚖️ Weight: ${state.weight.weight}g`);
@@ -289,6 +289,7 @@ async function executeAutoCycle() {
       cycleDuration: cycleEndTime - cycleStartTime
     };
 
+    // Publish cycle complete to backend
     mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(cycleData));
     
     console.log('========================================');
@@ -299,10 +300,23 @@ async function executeAutoCycle() {
   } catch (error) {
     console.error('❌ Cycle error:', error.message);
   } finally {
+    // CRITICAL: Clear all cycle and session data
     state.cycleInProgress = false;
     state.aiResult = null;
     state.weight = null;
     state.calibrationAttempts = 0;
+    state.sessionId = null;
+    state.currentUserId = null;  // ✅ Clear user ID
+    state.currentUserData = null; // ✅ Clear user data
+    
+    // Publish ready status for next user
+    console.log('🟢 READY FOR NEXT USER\n');
+    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+      deviceId: CONFIG.device.id,
+      status: 'ready',
+      autoCycleEnabled: state.autoCycleEnabled,
+      timestamp: new Date().toISOString()
+    }));
   }
 }
 
@@ -318,6 +332,8 @@ async function emergencyStop() {
     state.autoCycleEnabled = false;
     state.aiResult = null;
     state.weight = null;
+    state.currentUserId = null;
+    state.currentUserData = null;
     
     console.log('✅ Emergency stop complete');
   } catch (error) {
@@ -468,6 +484,12 @@ mqttClient.on('message', async (topic, message) => {
     const payload = JSON.parse(message.toString());
     
     if (topic === CONFIG.mqtt.topics.qrScan) {
+      // Check if a cycle is already in progress
+      if (state.cycleInProgress) {
+        console.log('⚠️ Cycle in progress, ignoring QR scan');
+        return;
+      }
+      
       console.log('\n========================================');
       console.log('✅ QR VALIDATED BY BACKEND');
       console.log('========================================');
@@ -597,10 +619,11 @@ function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - COMPLETE SEQUENCE');
+console.log('🚀 RVM AGENT - SESSION MANAGEMENT');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('✅ QR via backend → MQTT → Agent');
+console.log('✅ Automatic session cleanup');
 console.log('========================================');
 console.log('⏳ Starting...\n');
