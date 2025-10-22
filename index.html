@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QR Scanner Test - RVM-3101</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        input {
+            width: 100%;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            text-align: center;
+            letter-spacing: 2px;
+        }
+        input:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+            text-align: center;
+            font-weight: bold;
+        }
+        .ready { background: #e8f5e8; color: #2e7d32; }
+        .sending { background: #fff3e0; color: #ef6c00; }
+        .success { background: #e8f5e8; color: #2e7d32; }
+        .error { background: #ffebee; color: #c62828; }
+        .log {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-left: 3px solid #4CAF50;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>QR Scanner Test - RVM-3101</h1>
+        
+        <div class="input-group">
+            <input type="text" id="qrInput" placeholder="Enter QR code (e.g., 123456789012)" maxlength="50">
+        </div>
+        
+        <button onclick="sendQRCode()">Send QR Code</button>
+        <button onclick="resetTest()" style="background: #ff9800;">Reset Test</button>
+        
+        <div id="status" class="status ready">
+            ✅ Ready - Enter QR code and press Send
+        </div>
+        
+        <div class="log">
+            <strong>Test Log:</strong>
+            <div id="logContainer"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        let isConnected = false;
+
+        // Connect to WebSocket
+        function connectWebSocket() {
+            const wsUrl = 'ws://localhost:8081/websocket/qazwsz1234';
+            
+            try {
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = function() {
+                    isConnected = true;
+                    updateStatus('✅ WebSocket Connected - Ready to test', 'ready');
+                    addLog('Connected to WebSocket: ' + wsUrl);
+                };
+                
+                ws.onmessage = function(event) {
+                    addLog('Received: ' + event.data);
+                };
+                
+                ws.onclose = function() {
+                    isConnected = false;
+                    updateStatus('❌ WebSocket Disconnected', 'error');
+                    addLog('WebSocket disconnected - retrying in 3 seconds...');
+                    setTimeout(connectWebSocket, 3000);
+                };
+                
+                ws.onerror = function(error) {
+                    isConnected = false;
+                    updateStatus('❌ WebSocket Error', 'error');
+                    addLog('WebSocket error');
+                };
+                
+            } catch (error) {
+                addLog('WebSocket connection failed: ' + error.message);
+            }
+        }
+
+        // Send QR code
+        function sendQRCode() {
+            const qrInput = document.getElementById('qrInput');
+            const qrCode = qrInput.value.trim();
+            
+            if (!qrCode) {
+                updateStatus('⚠️ Please enter a QR code', 'error');
+                return;
+            }
+            
+            if (!isConnected) {
+                updateStatus('❌ WebSocket not connected', 'error');
+                return;
+            }
+            
+            // Create message in correct format
+            const message = {
+                function: 'qrcode',
+                data: qrCode
+            };
+            
+            updateStatus('🔄 Sending QR code...', 'sending');
+            addLog('Sending QR code: ' + qrCode);
+            
+            try {
+                ws.send(JSON.stringify(message));
+                updateStatus('✅ QR code sent successfully', 'success');
+                addLog('Sent via WebSocket: ' + JSON.stringify(message));
+                
+                // Clear input
+                qrInput.value = '';
+                
+            } catch (error) {
+                updateStatus('❌ Failed to send QR code', 'error');
+                addLog('Send failed: ' + error.message);
+            }
+        }
+
+        // Reset test
+        function resetTest() {
+            document.getElementById('qrInput').value = '';
+            document.getElementById('logContainer').innerHTML = '';
+            updateStatus('✅ Test reset - Ready for new QR code', 'ready');
+            addLog('Test reset');
+        }
+
+        // Update status
+        function updateStatus(message, type) {
+            const statusElement = document.getElementById('status');
+            statusElement.textContent = message;
+            statusElement.className = 'status ' + type;
+        }
+
+        // Add log entry
+        function addLog(message) {
+            const logContainer = document.getElementById('logContainer');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `[${timestamp}] ${message}`;
+            logContainer.appendChild(logEntry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        // Enter key support
+        document.getElementById('qrInput').addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                sendQRCode();
+            }
+        });
+
+        // Initialize when page loads
+        window.onload = function() {
+            connectWebSocket();
+            addLog('QR Scanner Test initialized');
+            addLog('Waiting for QR codes...');
+        };
+    </script>
+</body>
+</html>
