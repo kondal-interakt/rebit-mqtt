@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
-    <title>RVM-3101 QR Scanner</title>
+    <title>RVM-3101 QR Scanner - Agent Connected</title>
     <style>
         * {
             margin: 0;
@@ -54,7 +54,26 @@
             text-align: center;
             color: #666;
             font-size: 14px;
-            margin-bottom: 30px;
+            margin-bottom: 10px;
+        }
+
+        .connection-status {
+            text-align: center;
+            padding: 8px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .connection-status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .connection-status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
         }
 
         .status-card {
@@ -239,7 +258,6 @@
             font-size: 14px;
         }
 
-        /* Scrollbar styling */
         .scan-history::-webkit-scrollbar {
             width: 8px;
         }
@@ -283,6 +301,10 @@
     <div class="container">
         <h1>🔍 QR Code Scanner</h1>
         <div class="device-id">Device: RVM-3101</div>
+        
+        <div id="connectionStatus" class="connection-status disconnected">
+            🔴 Agent Disconnected
+        </div>
 
         <div id="statusCard" class="status-card ready">
             <div class="status-icon">📱</div>
@@ -332,10 +354,14 @@
                 validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
                 timeout: 10000
             },
+            websocket: {
+                url: 'ws://localhost:8081/websocket/qazwsx1234',
+                reconnectDelay: 5000
+            },
             qr: {
                 minLength: 8,
                 maxLength: 20,
-                scanDelay: 100 // Reduced delay for faster response
+                scanDelay: 100
             }
         };
 
@@ -345,6 +371,8 @@
             lastKeyTime: 0,
             isProcessing: false,
             scanTimer: null,
+            ws: null,
+            wsConnected: false,
             stats: {
                 total: 0,
                 success: 0,
@@ -359,8 +387,60 @@
             scanHistory: document.getElementById('scanHistory'),
             totalScans: document.getElementById('totalScans'),
             successScans: document.getElementById('successScans'),
-            failedScans: document.getElementById('failedScans')
+            failedScans: document.getElementById('failedScans'),
+            connectionStatus: document.getElementById('connectionStatus')
         };
+
+        // ============ WEBSOCKET CONNECTION ============
+        function connectWebSocket() {
+            console.log('🔌 Connecting to agent WebSocket...');
+            
+            state.ws = new WebSocket(CONFIG.websocket.url);
+            
+            state.ws.onopen = () => {
+                console.log('✅ WebSocket connected to agent');
+                state.wsConnected = true;
+                elements.connectionStatus.className = 'connection-status connected';
+                elements.connectionStatus.innerHTML = '🟢 Agent Connected';
+            };
+            
+            state.ws.onmessage = (e) => {
+                try {
+                    const message = JSON.parse(e.data);
+                    console.log('📡 Agent message:', message);
+                    
+                    // Handle agent responses if needed
+                    if (message.type === 'ack') {
+                        console.log('✅ Agent acknowledged QR validation');
+                    }
+                } catch (error) {
+                    console.log('📡 Agent message (raw):', e.data);
+                }
+            };
+            
+            state.ws.onclose = () => {
+                console.log('⚠️ Agent disconnected, reconnecting...');
+                state.wsConnected = false;
+                elements.connectionStatus.className = 'connection-status disconnected';
+                elements.connectionStatus.innerHTML = '🔴 Agent Disconnected';
+                setTimeout(connectWebSocket, CONFIG.websocket.reconnectDelay);
+            };
+            
+            state.ws.onerror = (error) => {
+                console.error('❌ WebSocket error:', error);
+            };
+        }
+
+        function sendToAgent(data) {
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                state.ws.send(JSON.stringify(data));
+                console.log('✅ Sent to agent:', data);
+                return true;
+            } else {
+                console.warn('⚠️ Agent not connected, cannot send data');
+                return false;
+            }
+        }
 
         // ============ STATUS MANAGEMENT ============
         function updateStatus(icon, text, subtext, type) {
@@ -379,7 +459,6 @@
             }
         }
 
-        // Keep input focused
         setInterval(ensureFocus, 100);
         
         document.addEventListener('click', (e) => {
@@ -484,17 +563,42 @@
                 updateStatus(
                     '✅',
                     'Validation Successful!',
-                    result.user.name ? `Welcome ${result.user.name}!` : 'User validated',
+                    'Starting RVM cycle...',
                     'success'
                 );
                 
                 addScanToHistory(cleanCode, true, result.user);
 
-                // Auto photo trigger after successful validation
-                console.log('✅ QR validated - Starting auto cycle');
-                
-                // You can trigger auto photo here or send message to WebSocket
-                // triggerAutoPhoto();
+                // ✅ SEND TO AGENT VIA WEBSOCKET
+                const agentMessage = {
+                    type: 'qr_validated',
+                    sessionCode: cleanCode,
+                    userId: result.user.id || result.user._id || null,
+                    userName: result.user.name || result.user.username || 'Unknown',
+                    userEmail: result.user.email || null,
+                    timestamp: new Date().toISOString(),
+                    startAutoCycle: true
+                };
+
+                const sentToAgent = sendToAgent(agentMessage);
+
+                if (sentToAgent) {
+                    console.log('✅ QR validated - Agent notified to start auto cycle');
+                    updateStatus(
+                        '🚀',
+                        'Auto Cycle Starting',
+                        'Gate opening, place your item...',
+                        'success'
+                    );
+                } else {
+                    console.warn('⚠️ QR validated but agent not connected');
+                    updateStatus(
+                        '⚠️',
+                        'Agent Not Connected',
+                        'QR valid but cannot start cycle',
+                        'error'
+                    );
+                }
 
             } else {
                 // Failed validation
@@ -535,7 +639,6 @@
             state.stats.total++;
             updateStats();
 
-            // Remove "no scans" message if it exists
             const noScans = elements.scanHistory.querySelector('.no-scans');
             if (noScans) {
                 noScans.remove();
@@ -544,8 +647,12 @@
             const scanItem = document.createElement('div');
             scanItem.className = `scan-item ${success ? 'success' : 'error'}`;
             
-            const userInfo = success && info.name 
-                ? `<div class="scan-user">👤 User: ${info.name || 'Unknown'}</div>`
+            const userName = success && info.name 
+                ? info.name 
+                : (success && info.username ? info.username : 'Unknown');
+            
+            const userInfo = success 
+                ? `<div class="scan-user">👤 User: ${userName}</div>`
                 : '';
             
             const errorInfo = !success 
@@ -561,7 +668,6 @@
 
             elements.scanHistory.insertBefore(scanItem, elements.scanHistory.firstChild);
 
-            // Keep only last 10 scans
             const items = elements.scanHistory.querySelectorAll('.scan-item');
             if (items.length > 10) {
                 items[items.length - 1].remove();
@@ -585,7 +691,6 @@
             const currentTime = Date.now();
             const timeDiff = currentTime - state.lastKeyTime;
 
-            // Reset buffer if too much time passed (not from scanner)
             if (timeDiff > 100) {
                 state.qrBuffer = '';
             }
@@ -596,12 +701,10 @@
                 event.preventDefault();
                 event.stopPropagation();
 
-                // Clear existing timer
                 if (state.scanTimer) {
                     clearTimeout(state.scanTimer);
                 }
 
-                // Process the scan
                 if (state.qrBuffer.length > 0) {
                     console.log('📱 QR Scan detected:', state.qrBuffer);
                     updateStatus(
@@ -613,11 +716,9 @@
                     processQRCode(state.qrBuffer);
                 }
             } else {
-                // Add character to buffer
                 state.qrBuffer += event.key;
                 elements.scanInput.value = state.qrBuffer;
 
-                // Auto-process after delay (in case Enter key is not sent)
                 if (state.scanTimer) {
                     clearTimeout(state.scanTimer);
                 }
@@ -633,53 +734,18 @@
             }
         });
 
-        // ============ OPTIONAL: WEBSOCKET CONNECTION ============
-        // Uncomment if you want to send results to local WebSocket
-        /*
-        let ws = null;
-        
-        function connectWebSocket() {
-            ws = new WebSocket('ws://localhost:8081/websocket/qazwsx1234');
-            
-            ws.onopen = () => {
-                console.log('✅ WebSocket connected');
-            };
-            
-            ws.onmessage = (e) => {
-                console.log('📡 WebSocket message:', e.data);
-            };
-            
-            ws.onclose = () => {
-                console.log('⚠️ WebSocket disconnected');
-                setTimeout(connectWebSocket, 5000);
-            };
-            
-            ws.onerror = (error) => {
-                console.error('❌ WebSocket error:', error);
-            };
-        }
-        
-        function sendToWebSocket(data) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    function: 'qrcode',
-                    data: data
-                }));
-            }
-        }
-        
-        // Start WebSocket connection
-        connectWebSocket();
-        */
-
         // ============ INITIALIZE ============
         console.log('========================================');
-        console.log('🚀 RVM-3101 QR Scanner - Frontend');
+        console.log('🚀 RVM-3101 QR Scanner - Agent Connected');
         console.log('========================================');
         console.log('✅ Scanner initialized');
         console.log(`🔐 Backend: ${CONFIG.backend.url}`);
+        console.log(`🔌 Agent: ${CONFIG.websocket.url}`);
         console.log('📱 Ready to scan QR codes');
         console.log('========================================');
+
+        // Connect to agent
+        connectWebSocket();
 
         // Ensure focus on start
         elements.scanInput.focus();
