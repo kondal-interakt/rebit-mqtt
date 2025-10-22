@@ -1,11 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RVM-3101 QR Scanner - WebSocket Connected</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>RVM-3101 QR Scanner - Fixed with Reset</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -15,6 +21,7 @@
             justify-content: center;
             padding: 20px;
         }
+
         .container {
             background: white;
             border-radius: 20px;
@@ -22,84 +29,205 @@
             max-width: 600px;
             width: 100%;
             padding: 40px;
+            position: relative;
+            overflow: hidden;
         }
-        h1 { 
-            color: #333; 
-            text-align: center; 
-            margin-bottom: 10px; 
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 6px;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
             font-size: 28px;
         }
+
         .device-id {
             text-align: center;
             color: #666;
             font-size: 14px;
             margin-bottom: 20px;
         }
+
         .status-card {
             padding: 20px;
             border-radius: 12px;
             margin-bottom: 25px;
             text-align: center;
-            border: 2px solid transparent;
             transition: all 0.3s ease;
+            border: 2px solid transparent;
         }
-        .status-card.ready { 
-            background: linear-gradient(135deg, #d4f8e8 0%, #8fd3f4 100%); 
-            border-color: #4caf50; 
+
+        .status-card.ready {
+            background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%);
+            border-color: #667eea;
         }
-        .status-card.validating { 
-            background: linear-gradient(135deg, #fff3cd 0%, #ffe0b2 100%); 
-            border-color: #ffc107; 
+
+        .status-card.scanning {
+            background: linear-gradient(135deg, #ffd89b 0%, #19547b20 100%);
+            border-color: #ffa726;
         }
-        .status-card.processing { 
-            background: linear-gradient(135deg, #ffe0b2 0%, #ffcc80 100%); 
-            border-color: #ff9800; 
+
+        .status-card.validating {
+            background: linear-gradient(135deg, #a8edea20 0%, #fed6e320 100%);
+            border-color: #4fc3f7;
         }
-        .status-card.error { 
-            background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); 
-            border-color: #f44336; 
+
+        .status-card.success {
+            background: linear-gradient(135deg, #d4f8e820 0%, #8fd3f420 100%);
+            border-color: #4caf50;
         }
-        .status-card.disconnected { 
-            background: linear-gradient(135deg, #f5f5f5 0%, #e0e0e0 100%); 
-            border-color: #9e9e9e; 
+
+        .status-card.error {
+            background: linear-gradient(135deg, #fce4ec20 0%, #f8bbd020 100%);
+            border-color: #f44336;
         }
-        .status-icon { 
-            font-size: 48px; 
-            margin-bottom: 10px; 
+
+        .status-card.recycling {
+            background: linear-gradient(135deg, #ffeb3b20 0%, #ff980020 100%);
+            border-color: #ff9800;
         }
-        .status-text { 
-            font-size: 18px; 
-            font-weight: 600; 
-            color: #333; 
+
+        .status-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
         }
-        .status-subtext { 
-            font-size: 14px; 
-            color: #666; 
-            margin-top: 8px; 
+
+        .status-text {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
         }
+
+        .status-subtext {
+            font-size: 14px;
+            color: #666;
+            margin-top: 8px;
+        }
+
         #scanInput {
             width: 100%;
             padding: 18px;
             font-size: 16px;
             border: 3px solid #e0e0e0;
             border-radius: 12px;
+            margin-bottom: 25px;
+            transition: all 0.3s ease;
             text-align: center;
             font-weight: 500;
             letter-spacing: 2px;
-            margin-bottom: 15px;
-            transition: all 0.3s ease;
         }
-        #scanInput:focus { 
-            outline: none; 
-            border-color: #667eea; 
+
+        #scanInput:focus {
+            outline: none;
+            border-color: #667eea;
             box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
         }
-        #scanInput:disabled { 
-            background: #f5f5f5; 
-            opacity: 0.7; 
-            cursor: not-allowed; 
+
+        #scanInput:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+            opacity: 0.7;
         }
-        .spinner {
+
+        .scan-history {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .scan-history h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .clear-btn {
+            background: #f44336;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .clear-btn:hover {
+            background: #d32f2f;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(244, 67, 54, 0.3);
+        }
+
+        .scan-item {
+            background: white;
+            padding: 15px;
+            margin-bottom: 12px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .scan-item.success {
+            border-left-color: #4caf50;
+        }
+
+        .scan-item.error {
+            border-left-color: #f44336;
+        }
+
+        .scan-code {
+            font-weight: 700;
+            color: #667eea;
+            font-size: 16px;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .scan-user {
+            color: #4caf50;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .scan-error {
+            color: #f44336;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .scan-time {
+            color: #999;
+            font-size: 12px;
+        }
+
+        .loading-spinner {
             display: inline-block;
             width: 20px;
             height: 20px;
@@ -107,14 +235,61 @@
             border-top: 3px solid #667eea;
             border-radius: 50%;
             animation: spin 1s linear infinite;
-            margin-right: 8px;
+            margin-right: 10px;
         }
-        @keyframes spin { 
-            0% { transform: rotate(0deg); } 
-            100% { transform: rotate(360deg); } 
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
-        .reset-btn {
-            background: #f44336;
+
+        .no-scans {
+            text-align: center;
+            color: #999;
+            padding: 30px;
+            font-size: 14px;
+        }
+
+        .scan-history::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .scan-history::-webkit-scrollbar-track {
+            background: #e0e0e0;
+            border-radius: 10px;
+        }
+
+        .scan-history::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 10px;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+        }
+
+        .manual-reset-btn {
+            background: #2196f3;
             color: white;
             border: none;
             padding: 12px 24px;
@@ -122,101 +297,86 @@
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
+            margin-top: 15px;
             width: 100%;
-            margin-bottom: 15px;
             transition: all 0.3s ease;
         }
-        .reset-btn:hover { 
-            background: #d32f2f; 
+
+        .manual-reset-btn:hover {
+            background: #1976d2;
             transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(244, 67, 54, 0.3);
-        }
-        .reset-btn:active {
-            transform: translateY(0);
-        }
-        .debug { 
-            background: #f5f5f5; 
-            padding: 15px; 
-            border-radius: 8px; 
-            font-size: 11px;
-            font-family: 'Courier New', monospace;
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid #e0e0e0;
-        }
-        .debug-line {
-            padding: 2px 0;
-            border-bottom: 1px solid #eee;
-        }
-        .debug-line:last-child {
-            border-bottom: none;
-        }
-        .debug-time {
-            color: #999;
-            margin-right: 8px;
-        }
-        .debug::-webkit-scrollbar {
-            width: 8px;
-        }
-        .debug::-webkit-scrollbar-track {
-            background: #e0e0e0;
-            border-radius: 10px;
-        }
-        .debug::-webkit-scrollbar-thumb {
-            background: #999;
-            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(33, 150, 243, 0.3);
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎯 QR Code Scanner</h1>
+        <h1>🎯 QR Scanner</h1>
         <div class="device-id">Device: RVM-3101</div>
-        
-        <div id="statusCard" class="status-card disconnected">
-            <div class="status-icon">⏳</div>
-            <div class="status-text">Connecting to Agent</div>
-            <div class="status-subtext">Please wait...</div>
+
+        <div id="statusCard" class="status-card ready">
+            <div class="status-icon">📱</div>
+            <div class="status-text">Ready to Scan</div>
+            <div class="status-subtext">Place QR code near scanner</div>
         </div>
-        
+
         <input 
             type="text" 
             id="scanInput" 
             placeholder="Scan QR Code Here..." 
-            autocomplete="off" 
+            autocomplete="off"
             autocorrect="off"
             autocapitalize="off"
-            spellcheck="false" 
-            disabled 
+            spellcheck="false"
         />
-        
-        <button class="reset-btn" onclick="forceReset()">🔄 Force Reset Scanner</button>
-        
-        <div class="debug" id="debugLog">
-            <div class="debug-line">Initializing scanner...</div>
+
+        <button class="manual-reset-btn" onclick="manualScannerReset()">
+            🔄 Manual Scanner Reset
+        </button>
+
+        <div class="scan-history">
+            <h3>
+                Recent Scans
+                <button class="clear-btn" onclick="clearHistory()">Clear</button>
+            </h3>
+            <div id="scanHistoryList">
+                <div class="no-scans">No scans yet. Start scanning QR codes!</div>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="totalScans">0</div>
+                <div class="stat-label">TOTAL</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="successScans">0</div>
+                <div class="stat-label">SUCCESS</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="failedScans">0</div>
+                <div class="stat-label">FAILED</div>
+            </div>
         </div>
     </div>
 
     <script>
         // ============ CONFIGURATION ============
         const CONFIG = {
-            backend: { 
-                url: 'https://rebit-api.ceewen.xyz', 
-                validateEndpoint: '/api/rvm/RVM-3101/qr/validate', 
-                timeout: 10000 
+            backend: {
+                url: 'https://rebit-api.ceewen.xyz',
+                validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
+                motorControlEndpoint: '/system/serial/motorSelect',
+                timeout: 10000
             },
-            websocket: {
-                url: 'ws://localhost:8081/websocket/qazwsx1234'
+            qr: {
+                minLength: 5,
+                maxLength: 50,
+                scanDelay: 200
             },
-            qr: { 
-                minLength: 5, 
-                maxLength: 50, 
-                scanDelay: 200 
-            },
-            timing: {
-                safetyTimeout: 60000,  // 60 seconds max wait
-                errorDisplay: 3000,    // 3 seconds to show errors
-                reconnectDelay: 5000   // 5 seconds before reconnecting
+            recycling: {
+                duration: 15000, // 15 seconds for recycling process
+                resetDelay: 2000 // 2 seconds delay before resetting scanner
             }
         };
 
@@ -226,35 +386,24 @@
             lastKeyTime: 0,
             scanTimer: null,
             isProcessing: false,
-            agentBusy: false,
-            ws: null,
-            wsConnected: false,
-            lastAgentStatus: 'unknown',
-            safetyTimer: null
+            isRecycling: false,
+            focusCheckEnabled: true,
+            stats: {
+                total: 0,
+                success: 0,
+                failed: 0
+            }
         };
 
         // ============ DOM ELEMENTS ============
         const elements = {
             scanInput: document.getElementById('scanInput'),
             statusCard: document.getElementById('statusCard'),
-            debugLog: document.getElementById('debugLog')
+            scanHistory: document.getElementById('scanHistoryList'),
+            totalScans: document.getElementById('totalScans'),
+            successScans: document.getElementById('successScans'),
+            failedScans: document.getElementById('failedScans')
         };
-
-        // ============ DEBUG LOGGING ============
-        function log(message, type = 'info') {
-            const timestamp = new Date().toLocaleTimeString();
-            const logLine = document.createElement('div');
-            logLine.className = 'debug-line';
-            logLine.innerHTML = `<span class="debug-time">[${timestamp}]</span>${message}`;
-            
-            console.log(`[${timestamp}] ${message}`);
-            elements.debugLog.insertBefore(logLine, elements.debugLog.firstChild);
-            
-            // Keep only last 50 lines
-            while (elements.debugLog.children.length > 50) {
-                elements.debugLog.removeChild(elements.debugLog.lastChild);
-            }
-        }
 
         // ============ STATUS UPDATES ============
         function updateStatus(icon, text, subtext, type) {
@@ -266,85 +415,69 @@
             `;
         }
 
-        // ============ WEBSOCKET CONNECTION ============
-        function connectWebSocket() {
-            log('🔌 Connecting to agent WebSocket...');
+        // ============ SCANNER RESET FUNCTION ============
+        async function resetScanner() {
+            console.log('🔄 Resetting scanner hardware...');
             
-            try {
-                state.ws = new WebSocket(CONFIG.websocket.url);
-
-                state.ws.onopen = function() {
-                    state.wsConnected = true;
-                    log('✅ WebSocket connected successfully');
-                    updateStatus('✅', 'Agent Connected', 'Ready to scan QR codes', 'ready');
-                    elements.scanInput.disabled = false;
-                    elements.scanInput.focus();
-                };
-
-                state.ws.onmessage = function(event) {
-                    try {
-                        const data = JSON.parse(event.data);
-                        log(`📨 Agent: function=${data.function}, data=${data.data}`);
-                        
-                        // Listen for agent ready status
-                        if (data.function === 'deviceStatus') {
-                            if (data.data === 'ready' || data.data === '0') {
-                                log('🟢 Agent reports READY state');
-                                state.lastAgentStatus = 'ready';
-                                
-                                // If we were waiting for agent, enable scanner now
-                                if (state.agentBusy) {
-                                    log('✅ Agent cycle complete - enabling scanner');
-                                    forceReset();
-                                }
-                            }
-                        }
-                        
-                        // Listen for cycle complete
-                        if (data.function === 'cycleComplete') {
-                            log('✅ Agent cycle complete message received');
-                            if (state.agentBusy) {
-                                forceReset();
-                            }
-                        }
-                        
-                    } catch (e) {
-                        log(`⚠️ WS parse error: ${e.message}`);
-                    }
-                };
-
-                state.ws.onclose = function() {
-                    state.wsConnected = false;
-                    log('❌ WebSocket disconnected');
-                    updateStatus('❌', 'Agent Disconnected', 'Reconnecting in 5 seconds...', 'disconnected');
-                    elements.scanInput.disabled = true;
-                    
-                    setTimeout(connectWebSocket, CONFIG.timing.reconnectDelay);
-                };
-
-                state.ws.onerror = function(error) {
-                    log(`❌ WebSocket error`);
-                };
-
-            } catch (e) {
-                log(`❌ WebSocket connection failed: ${e.message}`);
-                setTimeout(connectWebSocket, CONFIG.timing.reconnectDelay);
+            // Clear all buffers and timers
+            state.qrBuffer = '';
+            state.isProcessing = false;
+            state.isRecycling = false;
+            
+            if (state.scanTimer) {
+                clearTimeout(state.scanTimer);
+                state.scanTimer = null;
             }
+            
+            // Reset input field
+            elements.scanInput.value = '';
+            elements.scanInput.disabled = false;
+            
+            // Force focus back to input
+            setTimeout(() => {
+                elements.scanInput.focus();
+                console.log('✅ Scanner reset complete - Ready for new scans');
+            }, 100);
+            
+            updateStatus(
+                '📱',
+                'Ready to Scan',
+                'Place QR code near scanner',
+                'ready'
+            );
         }
 
-        // ============ FOCUS MANAGEMENT ============
+        // ============ MANUAL RESET BUTTON ============
+        function manualScannerReset() {
+            console.log('🔄 Manual scanner reset triggered');
+            resetScanner();
+        }
+
+        // ============ SMART FOCUS MANAGEMENT ============
         function ensureFocus() {
-            if (state.isProcessing || state.agentBusy || !state.wsConnected) {
+            if (state.isProcessing || state.isRecycling) {
                 return;
             }
+
+            if (!state.focusCheckEnabled) {
+                return;
+            }
+
             if (document.activeElement !== elements.scanInput) {
                 elements.scanInput.focus();
             }
         }
-        setInterval(ensureFocus, 100);
 
-        document.addEventListener('click', function(e) {
-            if (e.target !== elements.scanInput && !state.isProcessing && !state.agentBusy && state.wsConnected) {
+        const focusInterval = setInterval(ensureFocus, 100);
+
+        document.addEventListener('click', (e) => {
+            if (e.target !== elements.scanInput && !state.isProcessing && !state.isRecycling) {
+                elements.scanInput.focus();
+            }
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && !state.isProcessing && !state.isRecycling) {
                 elements.scanInput.focus();
             }
         });
@@ -352,200 +485,244 @@
         // ============ QR VALIDATION ============
         async function validateQRCode(sessionCode) {
             const url = `${CONFIG.backend.url}${CONFIG.backend.validateEndpoint}`;
-            log(`🔐 Validating QR code: ${sessionCode}`);
+            
+            console.log('🔐 Validating QR Code:', sessionCode);
             
             try {
                 const response = await fetch(url, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
                     body: JSON.stringify({ sessionCode }),
                     signal: AbortSignal.timeout(CONFIG.backend.timeout)
                 });
-                
+
                 const data = await response.json();
-                log(`Backend response: ${JSON.stringify(data)}`);
                 
+                console.log('Response:', data);
+
                 if (data.success) {
-                    log(`✅ QR Valid - User: ${data.user?.name || data.user?.username || 'Unknown'}`);
-                    return { valid: true, user: data.user || {} };
+                    return {
+                        valid: true,
+                        user: data.user || {},
+                        data: data
+                    };
                 } else {
-                    log(`❌ QR Invalid: ${data.error || 'Unknown error'}`);
-                    return { valid: false, error: data.error || 'Invalid QR Code' };
+                    return {
+                        valid: false,
+                        error: data.error || 'Invalid QR Code'
+                    };
+                }
+
+            } catch (error) {
+                console.error('❌ Validation Error:', error);
+                
+                if (error.name === 'TimeoutError') {
+                    return { valid: false, error: 'Request timeout' };
                 }
                 
-            } catch (error) {
-                log(`❌ Validation error: ${error.message}`);
-                return { 
-                    valid: false, 
-                    error: error.name === 'TimeoutError' ? 'Request timeout' : 'Network error' 
+                return {
+                    valid: false,
+                    error: error.message || 'Network error'
                 };
             }
         }
 
+        // ============ RECYCLING PROCESS SIMULATION ============
+        async function simulateRecyclingProcess() {
+            console.log('🔄 Starting recycling process simulation...');
+            state.isRecycling = true;
+            elements.scanInput.disabled = true;
+            
+            // Show recycling status
+            updateStatus(
+                '♻️',
+                'Recycling in Progress',
+                'Please wait while we process your item...',
+                'recycling'
+            );
+
+            // Simulate the recycling process duration
+            await new Promise(resolve => setTimeout(resolve, CONFIG.recycling.duration));
+
+            console.log('✅ Recycling process completed');
+            
+            // Wait a bit before resetting scanner
+            await new Promise(resolve => setTimeout(resolve, CONFIG.recycling.resetDelay));
+            
+            // Reset scanner for next user
+            await resetScanner();
+        }
+
         // ============ SCAN PROCESSING ============
         async function processQRCode(qrData) {
-            if (state.isProcessing || state.agentBusy) {
-                log('⏳ System busy - ignoring scan');
+            if (state.isProcessing || state.isRecycling) {
+                console.log('⏳ Already processing a scan or recycling');
                 return;
             }
 
-            if (!state.wsConnected) {
-                log('❌ Agent not connected - ignoring scan');
-                updateStatus('❌', 'Not Connected', 'Please wait for agent connection', 'error');
-                return;
-            }
-
-            log(`📱 Processing QR scan: ${qrData}`);
-            
             state.isProcessing = true;
-            state.agentBusy = true;
             elements.scanInput.disabled = true;
             
             const cleanCode = qrData.replace('Enter', '').trim();
 
-            // Validate QR format
             if (cleanCode.length < CONFIG.qr.minLength || cleanCode.length > CONFIG.qr.maxLength) {
-                log(`❌ Invalid QR length: ${cleanCode.length} (min: ${CONFIG.qr.minLength}, max: ${CONFIG.qr.maxLength})`);
-                updateStatus('❌', 'Invalid QR Code', `Length must be ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength} characters`, 'error');
-                setTimeout(() => forceReset(), CONFIG.timing.errorDisplay);
+                console.log('❌ Invalid QR code length:', cleanCode.length);
+                addScanToHistory(cleanCode, false, `Invalid length (${cleanCode.length} chars)`);
+                resetScanner();
                 return;
             }
 
             if (!/^\d+$/.test(cleanCode)) {
-                log('❌ QR code must contain only numbers');
-                updateStatus('❌', 'Invalid QR Code', 'Must contain only numbers', 'error');
-                setTimeout(() => forceReset(), CONFIG.timing.errorDisplay);
+                console.log('❌ QR code must be numeric only');
+                addScanToHistory(cleanCode, false, 'Must be numeric only');
+                resetScanner();
                 return;
             }
 
-            // Show validating status
             updateStatus(
-                '<div class="spinner"></div>', 
-                'Validating QR Code', 
-                `Checking: ${cleanCode}`, 
+                '<div class="loading-spinner"></div>',
+                'Validating QR Code',
+                `Checking code: ${cleanCode}`,
                 'validating'
             );
 
-            // Validate with backend
             const result = await validateQRCode(cleanCode);
 
             if (result.valid) {
-                log('✅ QR code validated successfully');
-                log('⏳ Agent will now process the cycle...');
-                
+                state.stats.success++;
                 updateStatus(
-                    '🚀', 
-                    'Agent Processing Cycle', 
-                    'Please wait for sorting and crushing to complete...', 
-                    'processing'
+                    '🚀',
+                    'Gate Opening',
+                    'Place your item for recycling...',
+                    'success'
                 );
                 
-                // Set safety timeout (60 seconds)
-                state.safetyTimer = setTimeout(() => {
-                    if (state.agentBusy) {
-                        log('⚠️ Safety timeout reached (60s) - forcing reset');
-                        updateStatus('⚠️', 'Timeout', 'Cycle took too long - resetting', 'error');
-                        setTimeout(() => forceReset(), 2000);
-                    }
-                }, CONFIG.timing.safetyTimeout);
-                
-                log(`⏱️ Safety timeout set for ${CONFIG.timing.safetyTimeout / 1000}s`);
-                log('💡 Waiting for agent to report "ready" status...');
+                addScanToHistory(cleanCode, true, result.user);
 
-            } else {
-                log(`❌ QR validation failed: ${result.error}`);
-                updateStatus('❌', 'Validation Failed', result.error, 'error');
-                setTimeout(() => forceReset(), CONFIG.timing.errorDisplay);
-            }
-        }
-
-        // ============ FORCE RESET ============
-        function forceReset() {
-            log('🔄 === FORCE RESET INITIATED ===');
-            
-            // Clear safety timer
-            if (state.safetyTimer) {
-                clearTimeout(state.safetyTimer);
-                state.safetyTimer = null;
-                log('⏱️ Safety timer cleared');
-            }
-            
-            // Clear ALL state flags
-            state.qrBuffer = '';
-            state.isProcessing = false;
-            state.agentBusy = false;
-            
-            // Clear input field
-            elements.scanInput.value = '';
-            
-            log('🧹 State cleared');
-            
-            // Update UI based on connection status
-            if (state.wsConnected) {
-                elements.scanInput.disabled = false;
-                updateStatus('📱', 'Ready to Scan', 'Place QR code near scanner', 'ready');
-                log('✅ Scanner reset complete - ready for next scan');
-                
-                // Focus input
+                // Start recycling process simulation
                 setTimeout(() => {
-                    elements.scanInput.focus();
-                    log('🎯 Input focused');
-                }, 100);
+                    simulateRecyclingProcess();
+                }, 2000);
+
             } else {
-                elements.scanInput.disabled = true;
-                updateStatus('❌', 'Agent Disconnected', 'Waiting for connection...', 'disconnected');
-                log('⚠️ Scanner disabled (agent not connected)');
+                state.stats.failed++;
+                updateStatus(
+                    '❌',
+                    'Validation Failed',
+                    result.error || 'Invalid QR code',
+                    'error'
+                );
+                
+                addScanToHistory(cleanCode, false, result.error);
+                
+                // Reset scanner after failed validation
+                setTimeout(() => {
+                    resetScanner();
+                }, 3000);
             }
         }
 
-        // Make forceReset available globally for the button
-        window.forceReset = forceReset;
+        // ============ HISTORY MANAGEMENT ============
+        function addScanToHistory(code, success, info) {
+            state.stats.total++;
+            updateStats();
+
+            const noScans = elements.scanHistory.querySelector('.no-scans');
+            if (noScans) {
+                noScans.remove();
+            }
+
+            const scanItem = document.createElement('div');
+            scanItem.className = `scan-item ${success ? 'success' : 'error'}`;
+            
+            const userName = success && info.name 
+                ? info.name 
+                : (success && info.username ? info.username : 'Unknown');
+            
+            const userInfo = success 
+                ? `<div class="scan-user">👤 User: ${userName}</div>`
+                : '';
+            
+            const errorInfo = !success 
+                ? `<div class="scan-error">❌ ${info}</div>`
+                : '';
+
+            scanItem.innerHTML = `
+                <div class="scan-code">${success ? '✓' : '✗'} ${code}</div>
+                ${userInfo}
+                ${errorInfo}
+                <div class="scan-time">⏰ ${new Date().toLocaleString()}</div>
+            `;
+
+            elements.scanHistory.insertBefore(scanItem, elements.scanHistory.firstChild);
+
+            const items = elements.scanHistory.querySelectorAll('.scan-item');
+            if (items.length > 10) {
+                items[items.length - 1].remove();
+            }
+        }
+
+        function updateStats() {
+            elements.totalScans.textContent = state.stats.total;
+            elements.successScans.textContent = state.stats.success;
+            elements.failedScans.textContent = state.stats.failed;
+        }
+
+        function clearHistory() {
+            elements.scanHistory.innerHTML = '<div class="no-scans">No scans yet. Start scanning QR codes!</div>';
+            state.stats = { total: 0, success: 0, failed: 0 };
+            updateStats();
+        }
 
         // ============ KEYBOARD INPUT HANDLING ============
         elements.scanInput.addEventListener('keydown', function(event) {
-            // Block input if system is busy or disconnected
-            if (state.isProcessing || state.agentBusy || !state.wsConnected) {
+            // Don't accept input while processing or recycling
+            if (state.isProcessing || state.isRecycling) {
                 event.preventDefault();
-                log('⏸️ Input blocked (system busy or disconnected)');
                 return;
             }
 
             const currentTime = Date.now();
             const timeDiff = currentTime - state.lastKeyTime;
-            
-            // Reset buffer if too much time passed (not from scanner)
+
             if (timeDiff > 100) {
                 state.qrBuffer = '';
             }
-            
+
             state.lastKeyTime = currentTime;
 
             if (event.key === 'Enter') {
                 event.preventDefault();
                 event.stopPropagation();
-                
+
                 if (state.scanTimer) {
                     clearTimeout(state.scanTimer);
                 }
-                
+
                 if (state.qrBuffer.length > 0) {
-                    log(`⌨️ Enter key detected - buffer: ${state.qrBuffer}`);
+                    console.log('📱 QR Scan detected:', state.qrBuffer);
+                    updateStatus(
+                        '🔄',
+                        'Processing Scan',
+                        'Please wait...',
+                        'scanning'
+                    );
                     processQRCode(state.qrBuffer);
                 }
             } else {
-                // Add character to buffer
                 state.qrBuffer += event.key;
                 elements.scanInput.value = state.qrBuffer;
-                
+
                 if (state.scanTimer) {
                     clearTimeout(state.scanTimer);
                 }
-                
-                // Auto-process after delay (for scanners that don't send Enter)
+
                 if (state.qrBuffer.length >= CONFIG.qr.minLength) {
                     state.scanTimer = setTimeout(() => {
-                        if (state.qrBuffer.length > 0 && !state.isProcessing && !state.agentBusy) {
-                            log(`⏱️ Auto-process timeout - buffer: ${state.qrBuffer}`);
+                        if (state.qrBuffer.length > 0 && !state.isProcessing && !state.isRecycling) {
+                            console.log('📱 QR Scan completed (timeout):', state.qrBuffer);
                             processQRCode(state.qrBuffer);
                         }
                     }, CONFIG.qr.scanDelay);
@@ -553,24 +730,23 @@
             }
         });
 
-        // ============ WINDOW CLOSE HANDLER ============
-        window.addEventListener('beforeunload', function() {
-            if (state.ws) {
-                state.ws.close();
-                log('👋 Window closing - WebSocket closed');
-            }
+        // ============ CLEANUP ON PAGE UNLOAD ============
+        window.addEventListener('beforeunload', () => {
+            clearInterval(focusInterval);
+            console.log('🛑 Focus interval cleared');
         });
 
         // ============ INITIALIZE ============
-        log('========================================');
-        log('🚀 RVM-3101 QR Scanner Initializing');
-        log('========================================');
-        log(`🔐 Backend: ${CONFIG.backend.url}`);
-        log(`🔌 WebSocket: ${CONFIG.websocket.url}`);
-        log('========================================');
-        
-        // Start WebSocket connection
-        connectWebSocket();
+        console.log('========================================');
+        console.log('🚀 RVM-3101 QR Scanner - With Reset Fix');
+        console.log('========================================');
+        console.log('✅ Scanner initialized');
+        console.log(`🔐 Backend: ${CONFIG.backend.url}`);
+        console.log('📱 Ready to scan QR codes');
+        console.log('🔄 Scanner reset functionality enabled');
+        console.log('========================================');
+
+        elements.scanInput.focus();
     </script>
 </body>
 </html>
