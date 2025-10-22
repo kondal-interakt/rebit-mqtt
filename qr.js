@@ -111,64 +111,68 @@ function determineMaterialType(aiData) {
 }
 
 async function executeCommand(action, params = {}) {
-  if (!state.moduleId) {
-    console.log('⚠️ No module ID');
-    return;
+  const deviceType = 1;
+  
+  if (!state.moduleId && action !== 'getModuleId') {
+    throw new Error('Module ID not available');
   }
-
-  const moduleId = '05';
-  let endpoint = '';
-  let body = {};
-
+  
+  let apiUrl, apiPayload;
+  
   switch (action) {
     case 'openGate':
-      endpoint = '/system/serial/motorSelect';
-      body = { moduleId, motorId: '01', type: '03', deviceType: 1 };
-      await delay(CONFIG.timing.gateOperation);
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
+      apiPayload = { moduleId: state.moduleId, motorId: '01', type: '03', deviceType };
       break;
-
+      
     case 'closeGate':
-      endpoint = '/system/serial/motorSelect';
-      body = { moduleId, motorId: '01', type: '00', deviceType: 1 };
-      await delay(CONFIG.timing.gateOperation);
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
+      apiPayload = { moduleId: state.moduleId, motorId: '01', type: '00', deviceType };
       break;
-
-    case 'takePhoto':
-      endpoint = '/system/camera/process';
-      break;
-
+      
     case 'getWeight':
-      endpoint = '/system/serial/getWeight';
-      body = { moduleId: '06', type: '00' };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/getWeight`;
+      apiPayload = { moduleId: state.moduleId, type: '00' };
       break;
-
+      
     case 'calibrateWeight':
-      endpoint = '/system/serial/weightCalibration';
-      body = { moduleId: '07', type: '00' };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/weightCalibration`;
+      apiPayload = { moduleId: state.moduleId, type: '00' };
       break;
-
+      
+    case 'takePhoto':
+      apiUrl = `${CONFIG.local.baseUrl}/system/camera/process`;
+      apiPayload = {};
+      break;
+      
     case 'stepperMotor':
-      endpoint = '/system/serial/stepMotorSelect';
-      body = { moduleId: '0F', type: params.position || '01', deviceType: 1 };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/stepMotorSelect`;
+      apiPayload = { moduleId: CONFIG.motors.stepper.moduleId, type: params.position, deviceType };
       break;
-
+      
     case 'customMotor':
-      endpoint = '/system/serial/motorSelect';
-      body = { moduleId, ...params, deviceType: 1 };
+      apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
+      apiPayload = { moduleId: state.moduleId, ...params, deviceType };
       break;
-
+      
     default:
-      console.log(`❌ Unknown: ${action}`);
-      return;
+      throw new Error(`Unknown action: ${action}`);
   }
-
+  
+  console.log(`🔧 Executing: ${action}`, apiPayload);
+  
   try {
-    await axios.post(`${CONFIG.local.baseUrl}${endpoint}`, body, {
+    await axios.post(apiUrl, apiPayload, {
       timeout: CONFIG.local.timeout,
       headers: { 'Content-Type': 'application/json' }
     });
+    
+    if (action === 'takePhoto') await delay(1500);
+    if (action === 'getWeight') await delay(2000);
+    
   } catch (error) {
     console.error(`❌ ${action} failed:`, error.message);
+    throw error;
   }
 }
 
@@ -188,11 +192,22 @@ async function executeAutoCycle() {
   console.log('======================================\n');
 
   try {
+    if (state.autoPhotoTimer) {
+      clearTimeout(state.autoPhotoTimer);
+      state.autoPhotoTimer = null;
+    }
+    
+    console.log('▶️ Closing gate...');
+    await executeCommand('closeGate');
+    await delay(CONFIG.timing.gateOperation);
+    
+    console.log('▶️ Moving belt to stepper...');
     await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await delay(CONFIG.timing.positionSettle);
 
+    console.log('▶️ Rotating stepper...');
     if (state.aiResult.materialType === 'METAL_CAN') {
       await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.metalCan });
       await delay(CONFIG.timing.stepperRotate);
@@ -201,10 +216,12 @@ async function executeAutoCycle() {
       await delay(CONFIG.timing.stepperRotate);
     }
 
+    console.log('▶️ Reversing belt...');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
 
+    console.log('▶️ Resetting stepper...');
     await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await delay(CONFIG.timing.stepperReset);
 
@@ -408,8 +425,19 @@ mqttClient.on('message', async (topic, message) => {
         timestamp: payload.timestamp
       };
       
-      console.log('🚪 Opening gate...\n');
+      state.autoCycleEnabled = true;
+      
+      console.log('🔧 Resetting system...');
+      await executeCommand('customMotor', CONFIG.motors.belt.stop);
+      await executeCommand('customMotor', CONFIG.motors.compactor.stop);
+      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
+      await delay(2000);
+      console.log('✅ Reset complete\n');
+      
+      console.log('🚪 Opening gate...');
       await executeCommand('openGate');
+      await delay(CONFIG.timing.gateOperation);
+      console.log('✅ Gate opened!\n');
       
       console.log('⏱️  Auto photo in 5 seconds...\n');
       
@@ -507,10 +535,10 @@ function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - FRONTEND QR INTEGRATED');
+console.log('🚀 RVM AGENT - BACKEND QR CONTROL');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
-console.log('✅ QR scanning via frontend');
+console.log('✅ QR via backend → MQTT → Agent');
 console.log('========================================');
 console.log('⏳ Starting...\n');
