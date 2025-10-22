@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
-    <title>RVM-3101 QR Scanner - Agent Connected</title>
+    <title>RVM-3101 QR Scanner - Fixed Focus</title>
     <style>
         * {
             margin: 0;
@@ -125,6 +125,12 @@
             outline: none;
             border-color: #667eea;
             box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+        }
+
+        #scanInput:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+            opacity: 0.7;
         }
 
         .scan-history {
@@ -266,21 +272,21 @@
         }
 
         .stat-value {
-            font-size: 24px;
+            font-size: 28px;
             font-weight: 700;
             color: #667eea;
         }
 
         .stat-label {
             font-size: 12px;
-            color: #666;
+            color: #999;
             margin-top: 5px;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🔍 QR Code Scanner</h1>
+        <h1>🎯 QR Scanner</h1>
         <div class="device-id">Device: RVM-3101</div>
 
         <div id="statusCard" class="status-card ready">
@@ -290,19 +296,21 @@
         </div>
 
         <input 
-            autofocus 
             type="text" 
             id="scanInput" 
-            placeholder="Scanner ready..." 
-            readonly
-        >
+            placeholder="Scan QR Code Here..." 
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+        />
 
         <div class="scan-history">
             <h3>
-                <span>📋 Scan History</span>
+                Recent Scans
                 <button class="clear-btn" onclick="clearHistory()">Clear</button>
             </h3>
-            <div id="scanHistory">
+            <div id="scanHistoryList">
                 <div class="no-scans">No scans yet. Start scanning QR codes!</div>
             </div>
         </div>
@@ -310,15 +318,15 @@
         <div class="stats">
             <div class="stat-item">
                 <div class="stat-value" id="totalScans">0</div>
-                <div class="stat-label">Total Scans</div>
+                <div class="stat-label">TOTAL</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value" id="successScans">0</div>
-                <div class="stat-label">Successful</div>
+                <div class="stat-label">SUCCESS</div>
             </div>
             <div class="stat-item">
                 <div class="stat-value" id="failedScans">0</div>
-                <div class="stat-label">Failed</div>
+                <div class="stat-label">FAILED</div>
             </div>
         </div>
     </div>
@@ -332,9 +340,9 @@
                 timeout: 10000
             },
             qr: {
-                minLength: 8,
-                maxLength: 20,
-                scanDelay: 100
+                minLength: 5,
+                maxLength: 50,
+                scanDelay: 200
             }
         };
 
@@ -342,8 +350,9 @@
         const state = {
             qrBuffer: '',
             lastKeyTime: 0,
-            isProcessing: false,
             scanTimer: null,
+            isProcessing: false,
+            focusCheckEnabled: true,  // ✅ NEW: Control flag
             stats: {
                 total: 0,
                 success: 0,
@@ -353,14 +362,15 @@
 
         // ============ DOM ELEMENTS ============
         const elements = {
-            statusCard: document.getElementById('statusCard'),
             scanInput: document.getElementById('scanInput'),
-            scanHistory: document.getElementById('scanHistory'),
+            statusCard: document.getElementById('statusCard'),
+            scanHistory: document.getElementById('scanHistoryList'),
             totalScans: document.getElementById('totalScans'),
             successScans: document.getElementById('successScans'),
             failedScans: document.getElementById('failedScans')
         };
 
+        // ============ STATUS UPDATES ============
         function updateStatus(icon, text, subtext, type) {
             elements.statusCard.className = `status-card ${type}`;
             elements.statusCard.innerHTML = `
@@ -370,23 +380,42 @@
             `;
         }
 
-        // ============ FOCUS MANAGEMENT ============
+        // ============ SMART FOCUS MANAGEMENT ============
+        // ✅ FIX: Only refocus when NOT processing
         function ensureFocus() {
+            // Don't force focus if:
+            // 1. Processing is in progress
+            // 2. Focus checking is disabled
+            // 3. Input is already focused
+            if (state.isProcessing) {
+                console.log('⏸️ Focus check paused (processing)');
+                return;
+            }
+
+            if (!state.focusCheckEnabled) {
+                console.log('⏸️ Focus check disabled');
+                return;
+            }
+
             if (document.activeElement !== elements.scanInput) {
+                console.log('🔄 Refocusing input');
                 elements.scanInput.focus();
             }
         }
 
-        setInterval(ensureFocus, 100);
-        
+        // ✅ Run focus check every 100ms, but RESPECTS processing state
+        const focusInterval = setInterval(ensureFocus, 100);
+
+        // Refocus on click (but only if not processing)
         document.addEventListener('click', (e) => {
-            if (e.target !== elements.scanInput) {
+            if (e.target !== elements.scanInput && !state.isProcessing) {
                 elements.scanInput.focus();
             }
         });
 
+        // Refocus on tab return (but only if not processing)
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) {
+            if (!document.hidden && !state.isProcessing) {
                 elements.scanInput.focus();
             }
         });
@@ -445,7 +474,10 @@
                 return;
             }
 
+            // ✅ FIX: Disable input and focus checking during processing
             state.isProcessing = true;
+            elements.scanInput.disabled = true;
+            
             const cleanCode = qrData.replace('Enter', '').trim();
 
             if (cleanCode.length < CONFIG.qr.minLength || cleanCode.length > CONFIG.qr.maxLength) {
@@ -500,10 +532,17 @@
         }
 
         function resetForNextScan() {
+            console.log('🔄 Resetting for next scan');
+            
+            // Clear buffer and input
             state.qrBuffer = '';
             elements.scanInput.value = '';
-            state.isProcessing = false;
             
+            // ✅ FIX: Re-enable processing FIRST
+            state.isProcessing = false;
+            elements.scanInput.disabled = false;
+            
+            // Update status
             updateStatus(
                 '📱',
                 'Ready to Scan',
@@ -511,7 +550,11 @@
                 'ready'
             );
             
-            elements.scanInput.focus();
+            // ✅ FIX: Focus AFTER re-enabling
+            setTimeout(() => {
+                elements.scanInput.focus();
+                console.log('✅ Ready for next scan');
+            }, 100);
         }
 
         // ============ HISTORY MANAGEMENT ============
@@ -568,6 +611,12 @@
 
         // ============ KEYBOARD INPUT HANDLING ============
         elements.scanInput.addEventListener('keydown', function(event) {
+            // Don't accept input while processing
+            if (state.isProcessing) {
+                event.preventDefault();
+                return;
+            }
+
             const currentTime = Date.now();
             const timeDiff = currentTime - state.lastKeyTime;
 
@@ -614,13 +663,20 @@
             }
         });
 
+        // ============ CLEANUP ON PAGE UNLOAD ============
+        window.addEventListener('beforeunload', () => {
+            clearInterval(focusInterval);
+            console.log('🛑 Focus interval cleared');
+        });
+
         // ============ INITIALIZE ============
         console.log('========================================');
-        console.log('🚀 RVM-3101 QR Scanner - Backend Control');
+        console.log('🚀 RVM-3101 QR Scanner - Fixed Focus');
         console.log('========================================');
         console.log('✅ Scanner initialized');
         console.log(`🔐 Backend: ${CONFIG.backend.url}`);
         console.log('📱 Ready to scan QR codes');
+        console.log('✅ Smart focus management active');
         console.log('========================================');
 
         elements.scanInput.focus();
