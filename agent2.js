@@ -87,17 +87,175 @@ const state = {
   sessionId: null,
   currentUserId: null,
   currentUserData: null,
-  autoPhotoTimer: null
+  autoPhotoTimer: null,
+  wsReady: false,
+  wsMessageHandler: null
 };
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const generateSessionId = () => `${CONFIG.device.id}-${Date.now()}`;
 
-// ============ NEW: Scanner Reset Function ============
+// ============ IMPROVED: WebSocket Management ============
+function connectWebSocket() {
+  return new Promise((resolve, reject) => {
+    console.log('🔌 Connecting WebSocket...');
+    
+    // Close existing WebSocket if any
+    if (state.ws) {
+      state.ws.removeAllListeners();
+      state.ws.close();
+      state.ws = null;
+    }
+    
+    state.ws = new WebSocket(CONFIG.local.wsUrl);
+    state.wsReady = false;
+    
+    state.ws.on('open', () => {
+      console.log('✅ WebSocket connected');
+      state.wsReady = true;
+      
+      // Set up message handler
+      state.wsMessageHandler = (data) => handleWebSocketMessage(data);
+      state.ws.on('message', state.wsMessageHandler);
+      
+      resolve();
+    });
+    
+    state.ws.on('close', (code, reason) => {
+      console.log(`⚠️ WebSocket closed: ${code} - ${reason}`);
+      state.wsReady = false;
+      
+      if (!state.cycleInProgress) {
+        setTimeout(() => {
+          console.log('🔄 Reconnecting WebSocket...');
+          connectWebSocket();
+        }, 5000);
+      }
+    });
+    
+    state.ws.on('error', (error) => {
+      console.error('❌ WebSocket error:', error.message);
+      state.wsReady = false;
+      reject(error);
+    });
+    
+    // Timeout after 10 seconds
+    setTimeout(() => {
+      if (!state.wsReady) {
+        console.error('❌ WebSocket connection timeout');
+        reject(new Error('WebSocket connection timeout'));
+      }
+    }, 10000);
+  });
+}
+
+// ============ IMPROVED: WebSocket Message Handler ============
+async function handleWebSocketMessage(data) {
+  try {
+    const message = JSON.parse(data);
+    console.log('📨 WebSocket Message:', message.function);
+    
+    if (message.function === '01') {
+      state.moduleId = message.moduleId || message.data;
+      console.log(`✅ Module ID: ${state.moduleId}`);
+      return;
+    }
+    
+    // ONLY process AI/Weight messages if we have an active user session
+    if (!state.currentUserId) {
+      console.log('⚠️ Ignoring WebSocket message - no active user session');
+      return;
+    }
+    
+    if (message.function === 'aiPhoto') {
+      const aiData = JSON.parse(message.data);
+      const probability = aiData.probability || 0;
+      
+      state.aiResult = {
+        matchRate: Math.round(probability * 100),
+        materialType: determineMaterialType(aiData),
+        className: aiData.className || '',
+        taskId: aiData.taskId,
+        timestamp: new Date().toISOString()
+      };
+      
+      console.log(`🤖 AI: ${state.aiResult.materialType} (${state.aiResult.matchRate}%)`);
+      
+      mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
+      
+      if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
+        const threshold = CONFIG.detection[state.aiResult.materialType];
+        const thresholdPercent = Math.round(threshold * 100);
+        
+        if (state.aiResult.matchRate >= thresholdPercent) {
+          console.log('✅ Proceeding to weight...\n');
+          setTimeout(() => executeCommand('getWeight'), 500);
+        } else {
+          console.log(`⚠️ Low confidence (${state.aiResult.matchRate}% < ${thresholdPercent}%)\n`);
+        }
+      }
+      return;
+    }
+    
+    if (message.function === '06') {
+      const weightValue = parseFloat(message.data) || 0;
+      const coefficient = CONFIG.weight.coefficients[1];
+      const calibratedWeight = weightValue * (coefficient / 1000);
+      
+      state.weight = {
+        weight: Math.round(calibratedWeight * 10) / 10,
+        rawWeight: weightValue,
+        coefficient: coefficient,
+        timestamp: new Date().toISOString()
+      };
+      
+      console.log(`⚖️ Weight: ${state.weight.weight}g`);
+      
+      mqttClient.publish(CONFIG.mqtt.topics.weightResult, JSON.stringify(state.weight));
+      
+      if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
+        state.calibrationAttempts++;
+        console.log(`⚠️ Calibrating (${state.calibrationAttempts}/2)...\n`);
+        setTimeout(async () => {
+          await executeCommand('calibrateWeight');
+          setTimeout(() => executeCommand('getWeight'), 1000);
+        }, 500);
+        return;
+      }
+      
+      if (state.weight.weight > 0) state.calibrationAttempts = 0;
+      
+      if (state.autoCycleEnabled && state.aiResult && state.weight.weight > 1 && !state.cycleInProgress) {
+        state.cycleInProgress = true;
+        setTimeout(() => executeAutoCycle(), 1000);
+      }
+      return;
+    }
+    
+    if (message.function === 'deviceStatus') {
+      const code = parseInt(message.data) || -1;
+      
+      if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress && state.currentUserId) {
+        console.log('👤 OBJECT DETECTED!\n');
+        if (state.autoPhotoTimer) {
+          clearTimeout(state.autoPhotoTimer);
+          state.autoPhotoTimer = null;
+        }
+        setTimeout(() => executeCommand('takePhoto'), 1000);
+      }
+      return;
+    }
+    
+  } catch (error) {
+    console.error('❌ WebSocket message error:', error.message);
+  }
+}
+
+// ============ IMPROVED: Scanner Reset Function ============
 async function resetScannerForNextUser() {
   console.log('\n🔄 RESETTING SCANNER FOR NEXT USER');
   
-  // Clear all user-specific data
+  // Clear all user-specific data FIRST
   state.currentUserId = null;
   state.currentUserData = null;
   state.autoCycleEnabled = false;
@@ -123,6 +281,15 @@ async function resetScannerForNextUser() {
     state.autoPhotoTimer = null;
   }
   
+  // RECONNECT WEBSOCKET to clear any pending messages
+  console.log('🔄 Reinitializing WebSocket for next user...');
+  try {
+    await connectWebSocket();
+    console.log('✅ WebSocket reinitialized for next user');
+  } catch (error) {
+    console.error('❌ WebSocket reinitialization failed:', error.message);
+  }
+  
   console.log('🟢 READY FOR NEXT QR SCAN\n');
   
   // Publish ready status
@@ -131,20 +298,6 @@ async function resetScannerForNextUser() {
     status: 'ready',
     timestamp: new Date().toISOString()
   }));
-}
-
-// ============ NEW: Status Check Function ============
-function getCurrentStatus() {
-  return {
-    deviceId: CONFIG.device.id,
-    status: state.cycleInProgress ? 'processing' : (state.currentUserId ? 'occupied' : 'ready'),
-    currentUser: state.currentUserId,
-    autoCycleEnabled: state.autoCycleEnabled,
-    cycleInProgress: state.cycleInProgress,
-    aiResult: state.aiResult ? state.aiResult.materialType : null,
-    weight: state.weight ? state.weight.weight : null,
-    timestamp: new Date().toISOString()
-  };
 }
 
 function determineMaterialType(aiData) {
@@ -360,7 +513,7 @@ async function executeAutoCycle() {
     // Reset scanner for next user after a short delay
     setTimeout(async () => {
       await resetScannerForNextUser();
-    }, 3000);
+    }, 2000);
   }
 }
 
@@ -387,6 +540,9 @@ async function emergencyStop() {
       state.autoPhotoTimer = null;
     }
     
+    // Reconnect WebSocket
+    await connectWebSocket();
+    
     console.log('✅ Emergency stop complete - Scanner reset');
     
     // Publish reset status
@@ -400,118 +556,6 @@ async function emergencyStop() {
   }
 }
 
-function connectWebSocket() {
-  state.ws = new WebSocket(CONFIG.local.wsUrl);
-  
-  state.ws.on('open', () => {
-    console.log('✅ WebSocket connected');
-    setTimeout(() => requestModuleId(), 1000);
-  });
-  
-  state.ws.on('message', async (data) => {
-    try {
-      const message = JSON.parse(data);
-      
-      if (message.function === '01') {
-        state.moduleId = message.moduleId || message.data;
-        console.log(`✅ Module ID: ${state.moduleId}`);
-        return;
-      }
-      
-      if (message.function === 'aiPhoto') {
-        const aiData = JSON.parse(message.data);
-        const probability = aiData.probability || 0;
-        
-        state.aiResult = {
-          matchRate: Math.round(probability * 100),
-          materialType: determineMaterialType(aiData),
-          className: aiData.className || '',
-          taskId: aiData.taskId,
-          timestamp: new Date().toISOString()
-        };
-        
-        console.log(`🤖 AI: ${state.aiResult.materialType} (${state.aiResult.matchRate}%)`);
-        
-        mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
-        
-        if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
-          const threshold = CONFIG.detection[state.aiResult.materialType];
-          const thresholdPercent = Math.round(threshold * 100);
-          
-          if (state.aiResult.matchRate >= thresholdPercent) {
-            console.log('✅ Proceeding to weight...\n');
-            setTimeout(() => executeCommand('getWeight'), 500);
-          } else {
-            console.log(`⚠️ Low confidence (${state.aiResult.matchRate}% < ${thresholdPercent}%)\n`);
-          }
-        }
-        return;
-      }
-      
-      if (message.function === '06') {
-        const weightValue = parseFloat(message.data) || 0;
-        const coefficient = CONFIG.weight.coefficients[1];
-        const calibratedWeight = weightValue * (coefficient / 1000);
-        
-        state.weight = {
-          weight: Math.round(calibratedWeight * 10) / 10,
-          rawWeight: weightValue,
-          coefficient: coefficient,
-          timestamp: new Date().toISOString()
-        };
-        
-        console.log(`⚖️ Weight: ${state.weight.weight}g`);
-        
-        mqttClient.publish(CONFIG.mqtt.topics.weightResult, JSON.stringify(state.weight));
-        
-        if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
-          state.calibrationAttempts++;
-          console.log(`⚠️ Calibrating (${state.calibrationAttempts}/2)...\n`);
-          setTimeout(async () => {
-            await executeCommand('calibrateWeight');
-            setTimeout(() => executeCommand('getWeight'), 1000);
-          }, 500);
-          return;
-        }
-        
-        if (state.weight.weight > 0) state.calibrationAttempts = 0;
-        
-        if (state.autoCycleEnabled && state.aiResult && state.weight.weight > 1 && !state.cycleInProgress) {
-          state.cycleInProgress = true;
-          setTimeout(() => executeAutoCycle(), 1000);
-        }
-        return;
-      }
-      
-      if (message.function === 'deviceStatus') {
-        const code = parseInt(message.data) || -1;
-        
-        if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
-          console.log('👤 OBJECT DETECTED!\n');
-          if (state.autoPhotoTimer) {
-            clearTimeout(state.autoPhotoTimer);
-            state.autoPhotoTimer = null;
-          }
-          setTimeout(() => executeCommand('takePhoto'), 1000);
-        }
-        return;
-      }
-      
-    } catch (error) {
-      console.error('❌ WS error:', error.message);
-    }
-  });
-  
-  state.ws.on('close', () => {
-    console.log('⚠️ WS closed, reconnecting...');
-    setTimeout(connectWebSocket, 5000);
-  });
-  
-  state.ws.on('error', (error) => {
-    console.error('❌ WS error:', error.message);
-  });
-}
-
 const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
   username: CONFIG.mqtt.username,
   password: CONFIG.mqtt.password,
@@ -519,7 +563,7 @@ const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
   rejectUnauthorized: false
 });
 
-mqttClient.on('connect', () => {
+mqttClient.on('connect', async () => {
   console.log('✅ MQTT connected');
   
   mqttClient.subscribe(CONFIG.mqtt.topics.commands);
@@ -532,7 +576,9 @@ mqttClient.on('connect', () => {
     timestamp: new Date().toISOString()
   }), { retain: true });
   
-  connectWebSocket();
+  // Initialize WebSocket
+  await connectWebSocket();
+  
   setTimeout(() => {
     requestModuleId();
   }, 2000);
@@ -682,10 +728,25 @@ async function requestModuleId() {
   }
 }
 
+function getCurrentStatus() {
+  return {
+    deviceId: CONFIG.device.id,
+    status: state.cycleInProgress ? 'processing' : (state.currentUserId ? 'occupied' : 'ready'),
+    currentUser: state.currentUserId,
+    autoCycleEnabled: state.autoCycleEnabled,
+    cycleInProgress: state.cycleInProgress,
+    aiResult: state.aiResult ? state.aiResult.materialType : null,
+    weight: state.weight ? state.weight.weight : null,
+    wsConnected: state.wsReady,
+    moduleId: state.moduleId,
+    timestamp: new Date().toISOString()
+  };
+}
+
 // ============ NEW: Periodic Status Updates ============
 setInterval(() => {
   const status = getCurrentStatus();
-  console.log('📊 Status Check:', status.status, 'User:', status.currentUser || 'None');
+  console.log('📊 Status Check:', status.status, 'User:', status.currentUser || 'None', 'WS:', status.wsConnected ? '✅' : '❌');
   
   // Publish status every 30 seconds
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify(status));
@@ -699,7 +760,10 @@ function gracefulShutdown() {
     timestamp: new Date().toISOString()
   }), { retain: true });
   
-  if (state.ws) state.ws.close();
+  if (state.ws) {
+    state.ws.removeAllListeners();
+    state.ws.close();
+  }
   mqttClient.end();
   
   process.exit(0);
@@ -708,12 +772,12 @@ function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - FIXED SCANNER RESET');
+console.log('🚀 RVM AGENT - FIXED WEBSOCKET RESET');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('✅ QR via backend → MQTT → Agent');
-console.log('✅ Automatic scanner reset after cycle');
-console.log('✅ One user at a time protection');
+console.log('✅ WebSocket reset after each cycle');
+console.log('✅ Message filtering by user session');
 console.log('========================================');
 console.log('⏳ Starting...\n');
