@@ -96,18 +96,36 @@ const generateSessionId = () => `${CONFIG.device.id}-${Date.now()}`;
 function determineMaterialType(aiData) {
   const className = (aiData.className || '').toLowerCase();
   const probability = aiData.probability || 0;
-
-  if (className.includes('can') || className.includes('metal')) {
-    return probability >= CONFIG.detection.METAL_CAN ? 'METAL_CAN' : 'UNKNOWN';
-  }
-  if (className.includes('bottle') || className.includes('plastic') || className.includes('pet')) {
-    return probability >= CONFIG.detection.PLASTIC_BOTTLE ? 'PLASTIC_BOTTLE' : 'UNKNOWN';
-  }
-  if (className.includes('glass')) {
-    return probability >= CONFIG.detection.GLASS ? 'GLASS' : 'UNKNOWN';
+  
+  let materialType = 'UNKNOWN';
+  let threshold = 1.0;
+  
+  if (className.includes('易拉罐') || className.includes('metal') || 
+      className.includes('can') || className.includes('铝')) {
+    materialType = 'METAL_CAN';
+    threshold = CONFIG.detection.METAL_CAN;
+  } else if (className.includes('pet') || className.includes('plastic') || 
+             className.includes('瓶') || className.includes('bottle')) {
+    materialType = 'PLASTIC_BOTTLE';
+    threshold = CONFIG.detection.PLASTIC_BOTTLE;
+  } else if (className.includes('玻璃') || className.includes('glass')) {
+    materialType = 'GLASS';
+    threshold = CONFIG.detection.GLASS;
   }
   
-  return 'UNKNOWN';
+  const confidencePercent = Math.round(probability * 100);
+  const thresholdPercent = Math.round(threshold * 100);
+  
+  if (materialType !== 'UNKNOWN' && probability < threshold) {
+    console.log(`⚠️ ${materialType} detected but confidence too low (${confidencePercent}% < ${thresholdPercent}%)`);
+    return 'UNKNOWN';
+  }
+  
+  if (materialType !== 'UNKNOWN') {
+    console.log(`✅ ${materialType} detected (${confidencePercent}%)`);
+  }
+  
+  return materialType;
 }
 
 async function executeCommand(action, params = {}) {
@@ -146,13 +164,24 @@ async function executeCommand(action, params = {}) {
       break;
       
     case 'stepperMotor':
+      // CRITICAL FIX: Include both 'id' and 'type' parameters
       apiUrl = `${CONFIG.local.baseUrl}/system/serial/stepMotorSelect`;
-      apiPayload = { moduleId: CONFIG.motors.stepper.moduleId, type: params.position, deviceType };
+      apiPayload = {
+        moduleId: CONFIG.motors.stepper.moduleId,
+        id: params.position,
+        type: params.position,
+        deviceType
+      };
       break;
       
     case 'customMotor':
       apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
-      apiPayload = { moduleId: state.moduleId, ...params, deviceType };
+      apiPayload = {
+        moduleId: state.moduleId,
+        motorId: params.motorId,
+        type: params.type,
+        deviceType
+      };
       break;
       
     default:
@@ -183,13 +212,16 @@ async function executeAutoCycle() {
     return;
   }
 
+  const cycleStartTime = Date.now();
   state.sessionId = generateSessionId();
   
-  console.log('\n========== AUTO CYCLE START ==========');
-  console.log(`🔹 Material: ${state.aiResult.materialType}`);
-  console.log(`🔹 Weight: ${state.weight.weight}g`);
-  console.log(`🔹 Session: ${state.sessionId}`);
-  console.log('======================================\n');
+  console.log('\n========================================');
+  console.log('🚀 CYCLE START');
+  console.log(`📋 Session: ${state.sessionId}`);
+  console.log(`📍 Material: ${state.aiResult.materialType}`);
+  console.log(`📊 Confidence: ${state.aiResult.matchRate}%`);
+  console.log(`⚖️ Weight: ${state.weight.weight}g`);
+  console.log('========================================\n');
 
   try {
     if (state.autoPhotoTimer) {
@@ -197,34 +229,55 @@ async function executeAutoCycle() {
       state.autoPhotoTimer = null;
     }
     
-    console.log('▶️ Closing gate...');
-    await executeCommand('closeGate');
+    // Step 1: Open Gate
+    console.log('▶️ Opening gate...');
+    await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
     
-    console.log('▶️ Moving belt to stepper...');
+    // Step 2: Belt to weight position
+    console.log('▶️ Moving to weight position...');
+    await executeCommand('customMotor', CONFIG.motors.belt.toWeight);
+    await delay(CONFIG.timing.beltToWeight);
+    await executeCommand('customMotor', CONFIG.motors.belt.stop);
+    
+    // Step 3: Belt to stepper position
+    console.log('▶️ Moving to stepper position...');
     await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await delay(CONFIG.timing.positionSettle);
 
-    console.log('▶️ Rotating stepper...');
-    if (state.aiResult.materialType === 'METAL_CAN') {
-      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.metalCan });
-      await delay(CONFIG.timing.stepperRotate);
-    } else if (state.aiResult.materialType === 'PLASTIC_BOTTLE') {
-      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.plasticBottle });
-      await delay(CONFIG.timing.stepperRotate);
-    }
+    // Step 4: Stepper dump
+    console.log('▶️ Dumping to crusher...');
+    const position = state.aiResult.materialType === 'METAL_CAN' 
+      ? CONFIG.motors.stepper.positions.metalCan 
+      : CONFIG.motors.stepper.positions.plasticBottle;
+    await executeCommand('stepperMotor', { position });
+    await delay(CONFIG.timing.stepperRotate);
+    
+    // Step 5: Compactor
+    console.log('▶️ Crushing...');
+    await executeCommand('customMotor', CONFIG.motors.compactor.start);
+    await delay(CONFIG.timing.compactor);
+    await executeCommand('customMotor', CONFIG.motors.compactor.stop);
 
-    console.log('▶️ Reversing belt...');
+    // Step 6: Belt return
+    console.log('▶️ Returning belt...');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
 
+    // Step 7: Reset stepper
     console.log('▶️ Resetting stepper...');
     await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await delay(CONFIG.timing.stepperReset);
+    
+    // Step 8: Close gate
+    console.log('▶️ Closing gate...');
+    await executeCommand('closeGate');
+    await delay(CONFIG.timing.gateOperation);
 
+    const cycleEndTime = Date.now();
     const cycleData = {
       sessionId: state.sessionId,
       deviceId: CONFIG.device.id,
@@ -232,12 +285,16 @@ async function executeAutoCycle() {
       weight: state.weight.weight,
       aiMatchRate: state.aiResult.matchRate,
       userId: state.currentUserId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      cycleDuration: cycleEndTime - cycleStartTime
     };
 
     mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(cycleData));
     
-    console.log('✅ CYCLE COMPLETE\n');
+    console.log('========================================');
+    console.log('✅ CYCLE COMPLETE');
+    console.log(`⏱️ Duration: ${Math.round((cycleEndTime - cycleStartTime) / 1000)}s`);
+    console.log('========================================\n');
 
   } catch (error) {
     console.error('❌ Cycle error:', error.message);
@@ -255,8 +312,14 @@ async function emergencyStop() {
   try {
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
-    await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await executeCommand('closeGate');
+    
+    state.cycleInProgress = false;
+    state.autoCycleEnabled = false;
+    state.aiResult = null;
+    state.weight = null;
+    
+    console.log('✅ Emergency stop complete');
   } catch (error) {
     console.error('❌ Emergency stop failed:', error.message);
   }
@@ -273,7 +336,6 @@ function connectWebSocket() {
   state.ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
-      console.log(`📡 WS: ${message.function || message.type}`);
       
       if (message.function === '01') {
         state.moduleId = message.moduleId || message.data;
@@ -282,11 +344,6 @@ function connectWebSocket() {
       }
       
       if (message.function === 'aiPhoto') {
-        if (state.autoPhotoTimer) {
-          clearTimeout(state.autoPhotoTimer);
-          state.autoPhotoTimer = null;
-        }
-        
         const aiData = JSON.parse(message.data);
         const probability = aiData.probability || 0;
         
@@ -468,6 +525,11 @@ mqttClient.on('message', async (topic, message) => {
     if (topic === CONFIG.mqtt.topics.commands) {
       console.log(`📩 Command: ${payload.action}`);
       
+      if (payload.action === 'emergencyStop') {
+        await emergencyStop();
+        return;
+      }
+      
       if (payload.action === 'takePhoto' && state.moduleId) {
         console.log('📸 MANUAL PHOTO!\n');
         if (state.autoPhotoTimer) {
@@ -535,7 +597,7 @@ function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - BACKEND QR CONTROL');
+console.log('🚀 RVM AGENT - COMPLETE SEQUENCE');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
