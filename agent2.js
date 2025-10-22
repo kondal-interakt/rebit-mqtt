@@ -16,7 +16,7 @@ const CONFIG = {
   
   local: {
     baseUrl: 'http://localhost:8081',
-    wsUrl: 'ws://localhost:8081/websocket/qazwsz1234', // CORRECT: from documentation
+    wsUrl: 'ws://localhost:8081/websocket/qazwsx1234', // CORRECT: from documentation
     timeout: 10000
   },
   
