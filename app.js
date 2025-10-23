@@ -480,7 +480,7 @@ function connectWebSocket() {
       const message = JSON.parse(data.toString());
       
       if (message.function === '01') {
-        state.moduleId = message.data;
+        state.moduleId = message.moduleId;
         console.log(`🔑 Module ID: ${state.moduleId}\n`);
         return;
       }
