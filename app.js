@@ -66,12 +66,13 @@ const CONFIG = {
     beltReverse: 5000,
     stepperRotate: 4000,
     stepperReset: 6000,
-    compactor: 25000,
+    compactor: 10000,
     positionSettle: 500,
     gateOperation: 1000,
     autoPhotoDelay: 8000,  // ← CHANGED: 8 seconds
     cycleTimeout: 30000,   // NEW: 30 second timeout for full cycle
-    weightTimeout: 15000   // NEW: 15 second timeout waiting for valid weight
+    weightTimeout: 15000,  // NEW: 15 second timeout waiting for valid weight
+    aiTimeout: 12000       // NEW: 12 second timeout waiting for AI result after photo
   },
   
   weight: {
@@ -93,6 +94,7 @@ const state = {
   autoPhotoTimer: null,
   cycleTimeoutTimer: null,      // NEW: Cycle timeout timer
   weightTimeoutTimer: null,      // NEW: Weight timeout timer
+  aiTimeoutTimer: null,          // NEW: AI result timeout timer
   objectDetectedTime: null       // NEW: Track when object was detected
 };
 
@@ -223,6 +225,10 @@ function clearAllTimers() {
   if (state.weightTimeoutTimer) {
     clearTimeout(state.weightTimeoutTimer);
     state.weightTimeoutTimer = null;
+  }
+  if (state.aiTimeoutTimer) {
+    clearTimeout(state.aiTimeoutTimer);
+    state.aiTimeoutTimer = null;
   }
 }
 
@@ -475,17 +481,23 @@ function connectWebSocket() {
     console.log('✅ WebSocket connected\n');
   });
   
-  state.ws.on('message', async (data) => {  // Made this async
+  state.ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data.toString());
       
       if (message.function === '01') {
-        state.moduleId = message.moduleId;
+        state.moduleId = message.data;
         console.log(`🔑 Module ID: ${state.moduleId}\n`);
         return;
       }
       
       if (message.function === '05') {
+        // Clear AI timeout since we got a result
+        if (state.aiTimeoutTimer) {
+          clearTimeout(state.aiTimeoutTimer);
+          state.aiTimeoutTimer = null;
+        }
+        
         const aiData = {
           className: message.data.className || 'unknown',
           probability: parseFloat(message.data.probability) || 0,
@@ -507,6 +519,17 @@ function connectWebSocket() {
         console.log(`📊 Type: ${state.aiResult.materialType}\n`);
         
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
+        
+        // ============ NEW: Handle UNKNOWN material type ============
+        if (state.autoCycleEnabled && state.aiResult.materialType === 'UNKNOWN') {
+          console.log('⚠️ No valid material detected (UNKNOWN)\n');
+          publishError('UNKNOWN_MATERIAL', 'AI could not identify material type', {
+            className: state.aiResult.className,
+            confidence: state.aiResult.matchRate
+          });
+          await resetSystemForNextScan('unknown_material');
+          return;
+        }
         
         if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
           const threshold = CONFIG.detection[state.aiResult.materialType];
@@ -623,6 +646,16 @@ function connectWebSocket() {
             clearTimeout(state.autoPhotoTimer);
             state.autoPhotoTimer = null;
           }
+          
+          // Start AI timeout
+          state.aiTimeoutTimer = setTimeout(async () => {
+            console.error('\n⏱️ AI TIMEOUT - No AI result received after photo!\n');
+            publishError('AI_TIMEOUT', 'AI did not respond after taking photo', {
+              timeSincePhoto: Date.now() - state.objectDetectedTime
+            });
+            await resetSystemForNextScan('ai_timeout');
+          }, CONFIG.timing.aiTimeout);
+          
           setTimeout(() => executeCommand('takePhoto'), 1000);
         }
         return;
@@ -669,7 +702,7 @@ mqttClient.on('connect', () => {
   }, 2000);
 });
 
-mqttClient.on('message', async (topic, message) => {  // Made this async
+mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
@@ -721,6 +754,16 @@ mqttClient.on('message', async (topic, message) => {  // Made this async
       
       state.autoPhotoTimer = setTimeout(() => {
         console.log('📸 AUTO PHOTO (No object detected)!\n');
+        
+        // Start AI timeout
+        state.aiTimeoutTimer = setTimeout(async () => {
+          console.error('\n⏱️ AI TIMEOUT - No AI result received after auto photo!\n');
+          publishError('AI_TIMEOUT', 'AI did not respond after taking auto photo', {
+            reason: 'auto_photo_no_response'
+          });
+          await resetSystemForNextScan('ai_timeout');
+        }, CONFIG.timing.aiTimeout);
+        
         executeCommand('takePhoto');
       }, CONFIG.timing.autoPhotoDelay);
       
@@ -751,6 +794,18 @@ mqttClient.on('message', async (topic, message) => {  // Made this async
       if (payload.action === 'takePhoto' && state.moduleId) {
         console.log('📸 MANUAL PHOTO!\n');
         clearAllTimers();
+        
+        // Start AI timeout for manual photo if auto cycle is enabled
+        if (state.autoCycleEnabled) {
+          state.aiTimeoutTimer = setTimeout(async () => {
+            console.error('\n⏱️ AI TIMEOUT - No AI result received after manual photo!\n');
+            publishError('AI_TIMEOUT', 'AI did not respond after manual photo', {
+              reason: 'manual_photo_no_response'
+            });
+            await resetSystemForNextScan('ai_timeout');
+          }, CONFIG.timing.aiTimeout);
+        }
+        
         await executeCommand('takePhoto');
         return;
       }
@@ -821,9 +876,11 @@ console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('✅ Auto photo: 8 seconds');
+console.log('✅ AI timeout: 12 seconds');
 console.log('✅ Weight timeout: 15 seconds');
 console.log('✅ Cycle timeout: 30 seconds');
 console.log('✅ Zero weight error handling');
 console.log('✅ Missing bottle detection');
+console.log('✅ UNKNOWN material auto-reset');
 console.log('========================================');
 console.log('⏳ Starting...\n');
