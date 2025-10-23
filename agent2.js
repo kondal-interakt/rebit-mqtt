@@ -401,7 +401,7 @@ function connectWebSocket() {
       }
       
       if (message.function === '01') {
-        state.moduleId = message.data;
+        state.moduleId = message.moduleId || message.data;
         console.log(`🔧 Module ID: ${state.moduleId}\n`);
         return;
       }
