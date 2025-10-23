@@ -66,8 +66,8 @@ const CONFIG = {
       stop: { motorId: "04", type: "00" }
     },
     stepper: {
-      moduleId: '0F', // use 0F per spec for stepper module
-      positions: { home: '00', metalCan: '02', plasticBottle: '03' }
+      moduleId: '09',
+      positions: { home: '01', metalCan: '02', plasticBottle: '03' }
     }
   },
 
