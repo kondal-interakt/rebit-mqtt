@@ -95,7 +95,8 @@ const state = {
   cycleTimeoutTimer: null,      // NEW: Cycle timeout timer
   weightTimeoutTimer: null,      // NEW: Weight timeout timer
   aiTimeoutTimer: null,          // NEW: AI result timeout timer
-  objectDetectedTime: null       // NEW: Track when object was detected
+  objectDetectedTime: null,      // NEW: Track when object was detected
+  isResetting: false             // NEW: Prevent concurrent resets
 };
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -255,6 +256,14 @@ function publishError(errorType, errorMessage, details = {}) {
 
 // ============ IMPROVED: Reset system for next scan with error handling ============
 async function resetSystemForNextScan(reason = 'normal') {
+  // Prevent concurrent resets
+  if (state.isResetting) {
+    console.log('⚠️ Reset already in progress, skipping...\n');
+    return;
+  }
+  
+  state.isResetting = true;
+  
   console.log('\n========================================');
   console.log(`🔄 RESETTING SYSTEM (Reason: ${reason})`);
   console.log('========================================\n');
@@ -300,6 +309,8 @@ async function resetSystemForNextScan(reason = 'normal') {
   console.log('========================================');
   console.log('✅ SYSTEM READY FOR NEXT QR SCAN');
   console.log('========================================\n');
+  
+  state.isResetting = false;
 }
 
 // ============ IMPROVED: Auto cycle with error handling ============
@@ -498,6 +509,17 @@ function connectWebSocket() {
           state.aiTimeoutTimer = null;
         }
         
+        // ============ CRITICAL: Ignore AI results during reset or when no active session ============
+        if (state.isResetting) {
+          console.log('⚠️ Ignoring AI result - reset in progress\n');
+          return;
+        }
+        
+        if (!state.autoCycleEnabled) {
+          console.log('⚠️ Ignoring AI result - no active session\n');
+          return;
+        }
+        
         const aiData = {
           className: message.data.className || 'unknown',
           probability: parseFloat(message.data.probability) || 0,
@@ -563,6 +585,17 @@ function connectWebSocket() {
       }
       
       if (message.function === '06') {
+        // ============ CRITICAL: Ignore weight results during reset or when no active session ============
+        if (state.isResetting) {
+          console.log('⚠️ Ignoring weight result - reset in progress\n');
+          return;
+        }
+        
+        if (!state.autoCycleEnabled) {
+          console.log('⚠️ Ignoring weight result - no active session\n');
+          return;
+        }
+        
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
         const calibratedWeight = weightValue * (coefficient / 1000);
