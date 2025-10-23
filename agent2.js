@@ -65,7 +65,7 @@ const CONFIG = {
     beltReverse: 5000,
     stepperRotate: 4000,
     stepperReset: 6000,
-    compactor: 10000,
+    compactor: 20000,
     positionSettle: 500,
     gateOperation: 1000,
     autoPhotoDelay: 5000
