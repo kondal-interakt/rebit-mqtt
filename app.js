@@ -91,11 +91,16 @@ const state = {
   currentUserId: null,
   currentUserData: null,
   autoPhotoTimer: null,
-  // NEW: Multi-bottle session tracking
+  // Multi-bottle session tracking
   sessionActive: false,
   bottleCount: 0,
   sessionBottles: [],
-  sessionStartTime: null
+  sessionStartTime: null,
+  // NEW: Loop protection flags
+  isPreparingNextBottle: false,
+  isResettingSystem: false,
+  motorStopAttempts: 0,
+  maxMotorStopAttempts: 3
 };
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -212,28 +217,96 @@ async function executeCommand(action, params = {}) {
   }
 }
 
-// ============ NEW FUNCTION: Prepare for next bottle (NOT full reset) ============
+// ============ NEW: Safe motor stop with retry limit ============
+async function safeStopMotors() {
+  console.log('🛑 Stopping all motors...');
+  
+  let beltStopped = false;
+  let compactorStopped = false;
+  let attempts = 0;
+  const maxAttempts = 3;
+  
+  while ((!beltStopped || !compactorStopped) && attempts < maxAttempts) {
+    attempts++;
+    console.log(`   Attempt ${attempts}/${maxAttempts}`);
+    
+    try {
+      if (!beltStopped) {
+        await executeCommand('customMotor', CONFIG.motors.belt.stop);
+        beltStopped = true;
+        console.log('   ✅ Belt stopped');
+      }
+    } catch (error) {
+      console.error(`   ⚠️ Belt stop failed: ${error.message}`);
+    }
+    
+    try {
+      if (!compactorStopped) {
+        await executeCommand('customMotor', CONFIG.motors.compactor.stop);
+        compactorStopped = true;
+        console.log('   ✅ Compactor stopped');
+      }
+    } catch (error) {
+      console.error(`   ⚠️ Compactor stop failed: ${error.message}`);
+    }
+    
+    if (!beltStopped || !compactorStopped) {
+      console.log(`   ⏳ Retrying in 1 second...`);
+      await delay(1000);
+    }
+  }
+  
+  if (!beltStopped || !compactorStopped) {
+    console.error('❌ WARNING: Some motors may still be running!');
+    return false;
+  }
+  
+  console.log('✅ All motors stopped\n');
+  return true;
+}
+
+// ============ FIXED: Prepare for next bottle with loop protection ============
 async function prepareForNextBottle() {
+  // CRITICAL: Prevent multiple simultaneous calls
+  if (state.isPreparingNextBottle) {
+    console.log('⚠️ Already preparing for next bottle, skipping...');
+    return;
+  }
+  
+  state.isPreparingNextBottle = true;
+  
   console.log('\n========================================');
   console.log('🔄 PREPARING FOR NEXT BOTTLE');
   console.log(`📦 Current count: ${state.bottleCount} bottles`);
   console.log('========================================\n');
   
   try {
-    // Stop motors
-    console.log('🛑 Stopping motors...');
-    await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    await executeCommand('customMotor', CONFIG.motors.compactor.stop);
-    console.log('✅ Motors stopped\n');
+    // Safe motor stop with retry limit
+    const motorsStopped = await safeStopMotors();
+    
+    if (!motorsStopped) {
+      console.error('❌ Failed to stop motors after max attempts!');
+      console.log('🚨 Triggering emergency stop...');
+      await emergencyStop();
+      state.isPreparingNextBottle = false;
+      return;
+    }
     
     // Reset stepper to home position
     console.log('🏠 Resetting stepper to home...');
-    await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
-    await delay(CONFIG.timing.stepperReset);
-    console.log('✅ Stepper reset\n');
+    try {
+      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
+      await delay(CONFIG.timing.stepperReset);
+      console.log('✅ Stepper reset\n');
+    } catch (error) {
+      console.error('❌ Stepper reset failed:', error.message);
+    }
     
   } catch (error) {
     console.error('❌ Prepare error:', error.message);
+  } finally {
+    // ALWAYS clear the flag
+    state.isPreparingNextBottle = false;
   }
   
   // Clear only cycle-specific state (NOT session state)
@@ -241,6 +314,7 @@ async function prepareForNextBottle() {
   state.weight = null;
   state.calibrationAttempts = 0;
   state.cycleInProgress = false;
+  state.motorStopAttempts = 0;
   
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
@@ -270,7 +344,7 @@ async function prepareForNextBottle() {
   });
   
   // Send via WebSocket to HTML
-  if (state.ws && state.ws.readyState === 1) {  // 1 = OPEN
+  if (state.ws && state.ws.readyState === 1) {
     const wsMessage = {
       function: 'bottleCount',
       data: state.bottleCount
@@ -292,7 +366,7 @@ async function prepareForNextBottle() {
   }, CONFIG.timing.autoPhotoDelay);
 }
 
-// ============ NEW FUNCTION: Complete session and send to backend ============
+// ============ Complete session and send to backend ============
 async function completeRecycleSession() {
   console.log('\n========================================');
   console.log('🏁 COMPLETING RECYCLE SESSION');
@@ -347,8 +421,16 @@ async function completeRecycleSession() {
   await resetSystemForNextScan();
 }
 
-// ============ FUNCTION: Reset system for next scan ============
+// ============ FIXED: Reset system with loop protection ============
 async function resetSystemForNextScan() {
+  // CRITICAL: Prevent multiple simultaneous calls
+  if (state.isResettingSystem) {
+    console.log('⚠️ Already resetting system, skipping...');
+    return;
+  }
+  
+  state.isResettingSystem = true;
+  
   console.log('\n========================================');
   console.log('🔄 RESETTING SYSTEM FOR NEXT SCAN');
   console.log('========================================\n');
@@ -356,24 +438,32 @@ async function resetSystemForNextScan() {
   try {
     // Close the gate
     console.log('🚪 Closing gate...');
-    await executeCommand('closeGate');
-    await delay(CONFIG.timing.gateOperation);
-    console.log('✅ Gate closed\n');
+    try {
+      await executeCommand('closeGate');
+      await delay(CONFIG.timing.gateOperation);
+      console.log('✅ Gate closed\n');
+    } catch (error) {
+      console.error('❌ Gate close failed:', error.message);
+    }
     
-    // Stop all motors
-    console.log('🛑 Stopping all motors...');
-    await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    await executeCommand('customMotor', CONFIG.motors.compactor.stop);
-    console.log('✅ Motors stopped\n');
+    // Safe motor stop
+    await safeStopMotors();
     
     // Reset stepper to home position
     console.log('🏠 Resetting stepper to home...');
-    await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
-    await delay(CONFIG.timing.stepperReset);
-    console.log('✅ Stepper reset\n');
+    try {
+      await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
+      await delay(CONFIG.timing.stepperReset);
+      console.log('✅ Stepper reset\n');
+    } catch (error) {
+      console.error('❌ Stepper reset failed:', error.message);
+    }
     
   } catch (error) {
     console.error('❌ Reset error:', error.message);
+  } finally {
+    // ALWAYS clear the flag
+    state.isResettingSystem = false;
   }
   
   // Clear ALL state variables
@@ -389,6 +479,9 @@ async function resetSystemForNextScan() {
   state.bottleCount = 0;
   state.sessionBottles = [];
   state.sessionStartTime = null;
+  state.motorStopAttempts = 0;
+  state.isPreparingNextBottle = false;
+  state.isResettingSystem = false;
   
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
@@ -485,17 +578,22 @@ async function executeAutoCycle() {
   } catch (error) {
     console.error('❌ Cycle error:', error.message);
     state.cycleInProgress = false;
+    
+    // Try to recover from error
+    console.log('🔄 Attempting error recovery...');
+    await safeStopMotors();
   }
 }
 
 async function emergencyStop() {
   console.log('\n🚨 EMERGENCY STOP');
   try {
-    await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    await executeCommand('customMotor', CONFIG.motors.compactor.stop);
+    await safeStopMotors();
     await executeCommand('closeGate');
     state.autoCycleEnabled = false;
     state.cycleInProgress = false;
+    state.isPreparingNextBottle = false;
+    state.isResettingSystem = false;
     console.log('✅ All systems stopped');
   } catch (error) {
     console.error('❌ Emergency stop failed:', error.message);
@@ -523,7 +621,7 @@ function connectWebSocket() {
         return;
       }
       
-      // ============ NEW: Handle finish recycle from HTML ============
+      // Handle finish recycle from HTML
       if (message.function === 'finishRecycle') {
         console.log('\n🏁 FINISH RECYCLE received from HTML via WebSocket!');
         console.log('Data:', message.data);
@@ -550,48 +648,51 @@ function connectWebSocket() {
         state.aiResult = {
           matchRate: Math.round((aiData.probability || 0) * 100),
           materialType: materialType,
-          className: aiData.className || 'Unknown',
-          taskId: aiData.taskId || 'unknown',
+          className: aiData.className || 'UNKNOWN',
+          taskId: aiData.taskId || Date.now().toString(),
           timestamp: new Date().toISOString()
         };
         
-        console.log(`🤖 AI: ${state.aiResult.materialType} (${state.aiResult.matchRate}%)`);
+        console.log(`\n🤖 AI: ${materialType} (${state.aiResult.matchRate}%)\n`);
         
-        mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
+        if (state.autoPhotoTimer) {
+          clearTimeout(state.autoPhotoTimer);
+          state.autoPhotoTimer = null;
+        }
         
-        if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
-          const threshold = CONFIG.detection[state.aiResult.materialType];
-          const thresholdPercent = Math.round(threshold * 100);
-          
-          if (state.aiResult.matchRate >= thresholdPercent) {
-            console.log('✅ Proceeding to weight...\n');
-            setTimeout(() => executeCommand('getWeight'), 500);
-          } else {
-            console.log(`⚠️ Low confidence (${state.aiResult.matchRate}% < ${thresholdPercent}%)\n`);
-          }
+        if (materialType === 'UNKNOWN') {
+          console.log('⚠️ Unrecognized - retaking photo in 3s\n');
+          state.autoPhotoTimer = setTimeout(() => {
+            executeCommand('takePhoto');
+          }, 3000);
+          return;
+        }
+        
+        if (state.autoCycleEnabled) {
+          setTimeout(() => executeCommand('getWeight'), 500);
         }
         return;
       }
       
-      if (message.function === '06') {
-        const weightValue = parseFloat(message.data) || 0;
-        const coefficient = CONFIG.weight.coefficients[1];
-        const calibratedWeight = weightValue * (coefficient / 1000);
+      if (message.function === '02' && message.data) {
+        const match = message.data.match(/(\d+)/);
+        const rawWeight = match ? parseInt(match[1]) : 0;
+        const coeff = CONFIG.weight.coefficients[1] || 988;
+        const weight = Math.round((rawWeight / coeff) * 100) / 100;
         
-        state.weight = {
-          weight: Math.round(calibratedWeight * 10) / 10,
-          rawWeight: weightValue,
-          coefficient: coefficient,
-          timestamp: new Date().toISOString()
-        };
+        state.weight = { weight, raw: rawWeight, coefficient: coeff };
+        console.log(`⚖️ Weight: ${weight}g\n`);
         
-        console.log(`⚖️ Weight: ${state.weight.weight}g`);
-        
-        mqttClient.publish(CONFIG.mqtt.topics.weightResult, JSON.stringify(state.weight));
-        
-        if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
+        if (weight === 0) {
           state.calibrationAttempts++;
-          console.log(`⚠️ Calibrating (${state.calibrationAttempts}/2)...\n`);
+          if (state.calibrationAttempts >= 5) {
+            console.log('❌ Calibration failed 5 times\n');
+            state.cycleInProgress = false;
+            state.calibrationAttempts = 0;
+            return;
+          }
+          
+          console.log(`🔄 Weight = 0, recalibrating... (${state.calibrationAttempts}/5)\n`);
           setTimeout(async () => {
             await executeCommand('calibrateWeight');
             setTimeout(() => executeCommand('getWeight'), 1000);
@@ -650,7 +751,7 @@ mqttClient.on('connect', () => {
   mqttClient.subscribe(CONFIG.mqtt.topics.commands);
   mqttClient.subscribe(CONFIG.mqtt.topics.autoControl);
   mqttClient.subscribe(CONFIG.mqtt.topics.qrScan);
-  mqttClient.subscribe(CONFIG.mqtt.topics.finishRecycle); // NEW
+  mqttClient.subscribe(CONFIG.mqtt.topics.finishRecycle);
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
@@ -668,7 +769,7 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
-    // ============ NEW: Handle finish recycle command ============
+    // Handle finish recycle command
     if (topic === CONFIG.mqtt.topics.finishRecycle) {
       if (!state.sessionActive || state.bottleCount === 0) {
         console.log('⚠️ No active session to finish');
@@ -715,8 +816,7 @@ mqttClient.on('message', async (topic, message) => {
       state.autoCycleEnabled = true;
       
       console.log('🔧 Resetting system...');
-      await executeCommand('customMotor', CONFIG.motors.belt.stop);
-      await executeCommand('customMotor', CONFIG.motors.compactor.stop);
+      await safeStopMotors();
       await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
       await delay(2000);
       console.log('✅ Reset complete\n');
@@ -855,7 +955,7 @@ function gracefulShutdown() {
 
 process.on('SIGINT', gracefulShutdown);
 
-// ============ KEYBOARD INPUT FOR MANUAL FINISH ============
+// Keyboard input for manual finish
 const readline = require('readline');
 readline.emitKeypressEvents(process.stdin);
 if (process.stdin.isTTY) {
@@ -882,11 +982,14 @@ process.stdin.on('keypress', async (str, key) => {
 });
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - MULTI-BOTTLE SESSION');
+console.log('🚀 RVM AGENT - LOOP PROTECTION');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('✅ One QR scan → Multiple bottles');
 console.log('✅ Finish button to complete session');
+console.log('✅ FIXED: Infinite loop protection');
+console.log('✅ FIXED: Smart motor stop with retries');
+console.log('✅ FIXED: Race condition prevention');
 console.log('========================================');
 console.log('⏳ Starting...\n');
