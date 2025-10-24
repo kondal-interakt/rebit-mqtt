@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
     <title>RVM-3101 - Industry Standard Recycling</title>
+    
+    <!-- Load Paho MQTT Client -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.min.js"></script>
+    
     <style>
         * {
             margin: 0;
@@ -423,6 +427,89 @@
             letter-spacing: 1px;
         }
 
+        /* Debug Panel */
+        .debug-panel {
+            background: #2c3e50;
+            color: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-top: 25px;
+            font-size: 14px;
+        }
+
+        .debug-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .debug-title {
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .debug-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .debug-item {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        .debug-label {
+            font-size: 12px;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+
+        .debug-value {
+            font-weight: 600;
+        }
+
+        .debug-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .debug-btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .debug-btn:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+        }
+
+        .debug-btn.danger {
+            background: #e74c3c;
+        }
+
+        .debug-btn.danger:hover {
+            background: #c0392b;
+        }
+
+        .debug-btn.success {
+            background: #27ae60;
+        }
+
+        .debug-btn.success:hover {
+            background: #219a52;
+        }
+
         /* Scrollbar Styling */
         .items-panel::-webkit-scrollbar {
             width: 8px;
@@ -474,6 +561,10 @@
             }
             
             .stats-footer {
+                grid-template-columns: 1fr;
+            }
+            
+            .debug-info {
                 grid-template-columns: 1fr;
             }
         }
@@ -559,6 +650,38 @@
                 <div class="stat-footer-label">Total Weight</div>
             </div>
         </div>
+
+        <!-- Debug Panel -->
+        <div class="debug-panel">
+            <div class="debug-header">
+                <div class="debug-title">🔧 System Debug Information</div>
+                <div class="debug-status" id="debugStatus">Initializing...</div>
+            </div>
+            <div class="debug-info">
+                <div class="debug-item">
+                    <div class="debug-label">MQTT Status</div>
+                    <div class="debug-value" id="mqttStatus">Disconnected</div>
+                </div>
+                <div class="debug-item">
+                    <div class="debug-label">Session State</div>
+                    <div class="debug-value" id="sessionState">No session</div>
+                </div>
+                <div class="debug-item">
+                    <div class="debug-label">Last Message</div>
+                    <div class="debug-value" id="lastMessage">None</div>
+                </div>
+                <div class="debug-item">
+                    <div class="debug-label">Connection Time</div>
+                    <div class="debug-value" id="connectionTime">--:--:--</div>
+                </div>
+            </div>
+            <div class="debug-actions">
+                <button class="debug-btn" onclick="forceStartSession()">🚨 Force Start Session</button>
+                <button class="debug-btn success" onclick="testMQTTConnection()">🔗 Test MQTT</button>
+                <button class="debug-btn" onclick="sendTestMessage()">📨 Send Test Message</button>
+                <button class="debug-btn danger" onclick="clearDebug()">🗑️ Clear Debug</button>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -569,7 +692,8 @@
                 topics: {
                     sessionUpdate: 'rvm/RVM-3101/session/update',
                     userInterface: 'rvm/RVM-3101/ui/state',
-                    commands: 'rvm/RVM-3101/commands'
+                    commands: 'rvm/RVM-3101/commands',
+                    status: 'rvm/RVM-3101/status'
                 }
             },
             session: {
@@ -599,6 +723,7 @@
             lastKeyTime: 0,
             scanTimer: null,
             isProcessing: false,
+            connectionStartTime: null,
             
             // Statistics
             stats: {
@@ -629,21 +754,37 @@
             // Statistics
             totalSessions: document.getElementById('totalSessions'),
             totalItems: document.getElementById('totalItems'),
-            totalWeight: document.getElementById('totalWeight')
+            totalWeight: document.getElementById('totalWeight'),
+            
+            // Debug
+            debugStatus: document.getElementById('debugStatus'),
+            mqttStatus: document.getElementById('mqttStatus'),
+            sessionState: document.getElementById('sessionState'),
+            lastMessage: document.getElementById('lastMessage'),
+            connectionTime: document.getElementById('connectionTime')
         };
 
         // ============ MQTT CONNECTION ============
         function connectMQTT() {
             try {
                 console.log('🔌 Connecting to MQTT broker...');
+                updateDebugInfo('MQTT Status', 'Connecting...');
+                
+                // Check if Paho is available
+                if (typeof Paho === 'undefined') {
+                    throw new Error('Paho MQTT client not loaded. Check CDN connection.');
+                }
+                
+                const clientId = `webclient_${Date.now()}_${Math.random().toString(16).substr(2, 8)}`;
                 
                 state.mqttClient = new Paho.MQTT.Client(
                     CONFIG.mqtt.brokerUrl,
-                    `webclient_${Date.now()}`
+                    clientId
                 );
 
                 state.mqttClient.onConnectionLost = (response) => {
                     console.log('❌ MQTT connection lost:', response.errorMessage);
+                    updateDebugInfo('MQTT Status', 'Disconnected');
                     updateStatus('❌', 'Connection Lost', 'Reconnecting...', MACHINE_STATES.IDLE);
                     setTimeout(connectMQTT, 5000);
                 };
@@ -652,30 +793,49 @@
                     try {
                         const payload = JSON.parse(message.payloadString);
                         console.log('📩 MQTT Message:', message.destinationName, payload);
+                        updateDebugInfo('Last Message', `${message.destinationName}: ${payload.type || 'message'}`);
                         handleMQTTMessage(message.destinationName, payload);
                     } catch (error) {
                         console.error('❌ MQTT message error:', error);
+                        updateDebugInfo('Last Message', `Error: ${error.message}`);
                     }
                 };
 
-                state.mqttClient.connect({
+                const options = {
                     onSuccess: () => {
                         console.log('✅ MQTT connected successfully');
+                        updateDebugInfo('MQTT Status', 'Connected');
+                        state.connectionStartTime = new Date();
+                        
+                        // Subscribe to topics
                         state.mqttClient.subscribe(CONFIG.mqtt.topics.sessionUpdate);
                         state.mqttClient.subscribe(CONFIG.mqtt.topics.userInterface);
+                        state.mqttClient.subscribe(CONFIG.mqtt.topics.status);
+                        
+                        console.log('📡 Subscribed to topics');
                         updateStatus('✅', 'System Ready', 'Scan QR code to start', MACHINE_STATES.READY);
                     },
                     onFailure: (error) => {
                         console.error('❌ MQTT connection failed:', error.errorMessage);
+                        updateDebugInfo('MQTT Status', `Failed: ${error.errorMessage}`);
                         updateStatus('❌', 'Connection Failed', 'Retrying...', MACHINE_STATES.IDLE);
                         setTimeout(connectMQTT, 5000);
                     },
                     useSSL: true,
-                    timeout: 3,
-                    keepAliveInterval: 60
-                });
+                    timeout: 10,
+                    keepAliveInterval: 60,
+                    reconnect: true,
+                    userName: 'mqttuser', // Add credentials if needed
+                    password: 'mqttUser@2025' // Add credentials if needed
+                };
+
+                state.mqttClient.connect(options);
+                
             } catch (error) {
                 console.error('❌ MQTT setup error:', error);
+                updateDebugInfo('MQTT Status', `Error: ${error.message}`);
+                updateStatus('❌', 'Setup Error', error.message, MACHINE_STATES.IDLE);
+                setTimeout(connectMQTT, 5000);
             }
         }
 
@@ -688,6 +848,11 @@
                 case CONFIG.mqtt.topics.userInterface:
                     handleUIStateUpdate(payload);
                     break;
+                case CONFIG.mqtt.topics.status:
+                    handleStatusUpdate(payload);
+                    break;
+                default:
+                    console.log('📨 Unknown topic:', topic, payload);
             }
         }
 
@@ -697,6 +862,9 @@
             switch (payload.type) {
                 case 'session_start':
                     startSession(payload);
+                    break;
+                case 'gate_opened':
+                    updateStatus('🚪', 'Gate Opened!', 'Start placing bottles on belt', MACHINE_STATES.READY);
                     break;
                 case 'item_processed':
                     addItemToUI(payload);
@@ -709,6 +877,9 @@
                     break;
                 case 'item_error':
                     showError('Processing Error', payload.error);
+                    break;
+                case 'session_error':
+                    showError('Session Error', payload.error);
                     break;
             }
         }
@@ -726,6 +897,11 @@
 
             const config = stateConfig[payload.state] || stateConfig['IDLE'];
             updateStatus(config.icon, config.text, config.subtext, payload.state.toLowerCase());
+        }
+
+        function handleStatusUpdate(payload) {
+            updateDebugInfo('Session State', payload.state || 'Unknown');
+            console.log('📊 Status Update:', payload);
         }
 
         // ============ SESSION MANAGEMENT ============
@@ -751,10 +927,11 @@
             startSessionTimer();
 
             // Update UI
-            updateStatus('🚀', 'Session Started!', 'Gate is open - start placing bottles', MACHINE_STATES.READY);
+            updateStatus('🚀', 'Session Started!', 'Gate is opening...', MACHINE_STATES.PROCESSING);
             elements.scanInput.placeholder = 'Session Active - Place Bottles Continuously';
             elements.scanInput.disabled = true;
 
+            updateDebugInfo('Session State', 'Active');
             console.log('🏭 Session started:', sessionData.sessionId);
         }
 
@@ -889,6 +1066,7 @@
                 elements.scanInput.disabled = false;
                 elements.scanInput.focus();
                 
+                updateDebugInfo('Session State', 'No session');
                 updateStatus('📱', 'Ready to Scan', 'Scan QR code to start new session', MACHINE_STATES.READY);
             }, 5000);
         }
@@ -933,6 +1111,8 @@
             setTimeout(() => {
                 if (state.currentSession) {
                     updateStatus('🟢', 'Ready for Next Bottle', 'Place next bottle on belt', MACHINE_STATES.READY);
+                } else {
+                    updateStatus('📱', 'Ready to Scan', 'Scan QR code to start', MACHINE_STATES.READY);
                 }
             }, 3000);
         }
@@ -951,6 +1131,74 @@
                 elements.sessionItems.textContent = '0';
                 elements.sessionWeight.textContent = '0g';
             }
+        }
+
+        // ============ DEBUG FUNCTIONS ============
+        function updateDebugInfo(field, value) {
+            switch(field) {
+                case 'MQTT Status':
+                    elements.mqttStatus.textContent = value;
+                    break;
+                case 'Session State':
+                    elements.sessionState.textContent = value;
+                    break;
+                case 'Last Message':
+                    elements.lastMessage.textContent = value;
+                    break;
+            }
+        }
+
+        function forceStartSession() {
+            if (state.mqttClient && state.mqttClient.isConnected()) {
+                const debugSession = {
+                    sessionId: 'debug-' + Date.now(),
+                    userId: 'debug-user',
+                    userName: 'Debug User',
+                    sessionCode: '123456',
+                    timestamp: new Date().toISOString()
+                };
+                
+                // Simulate MQTT message from backend
+                handleMQTTMessage(CONFIG.mqtt.topics.sessionUpdate, {
+                    type: 'session_start',
+                    ...debugSession
+                });
+                
+                console.log('🚨 DEBUG: Force started session');
+            } else {
+                alert('MQTT not connected. Cannot force start session.');
+            }
+        }
+
+        function testMQTTConnection() {
+            if (state.mqttClient && state.mqttClient.isConnected()) {
+                const message = new Paho.MQTT.Message(JSON.stringify({
+                    action: 'debugStatus'
+                }));
+                message.destinationName = CONFIG.mqtt.topics.commands;
+                state.mqttClient.send(message);
+                console.log('🔍 DEBUG: Sent debug status request');
+            } else {
+                alert('MQTT not connected. Please check connection.');
+            }
+        }
+
+        function sendTestMessage() {
+            if (state.mqttClient && state.mqttClient.isConnected()) {
+                const message = new Paho.MQTT.Message(JSON.stringify({
+                    action: 'openGate',
+                    test: true,
+                    timestamp: new Date().toISOString()
+                }));
+                message.destinationName = CONFIG.mqtt.topics.commands;
+                state.mqttClient.send(message);
+                console.log('📨 DEBUG: Sent test message');
+            }
+        }
+
+        function clearDebug() {
+            elements.lastMessage.textContent = 'None';
+            console.log('🗑️ DEBUG: Cleared debug messages');
         }
 
         // ============ QR SCANNING ============
@@ -1060,6 +1308,19 @@
             }
         }
 
+        // ============ CONNECTION TIME UPDATER ============
+        function updateConnectionTime() {
+            if (state.connectionStartTime) {
+                const now = new Date();
+                const diff = Math.floor((now - state.connectionStartTime) / 1000);
+                const hours = Math.floor(diff / 3600);
+                const minutes = Math.floor((diff % 3600) / 60);
+                const seconds = diff % 60;
+                elements.connectionTime.textContent = 
+                    `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+        }
+
         // ============ INITIALIZATION ============
         function initialize() {
             console.log('========================================');
@@ -1068,6 +1329,7 @@
             console.log('✅ Continuous Bottle Processing');
             console.log('✅ Real-time Session Management');
             console.log('✅ Professional UI/UX');
+            console.log('✅ Enhanced Debugging');
             console.log('========================================');
 
             // Connect to MQTT
@@ -1075,6 +1337,9 @@
 
             // Start focus management
             state.focusInterval = setInterval(ensureFocus, 100);
+
+            // Start connection time updater
+            setInterval(updateConnectionTime, 1000);
 
             // Focus input on start
             elements.scanInput.focus();
@@ -1091,6 +1356,8 @@
                     elements.scanInput.focus();
                 }
             });
+
+            updateDebugInfo('Debug Status', 'Initialized');
         }
 
         // ============ CLEANUP ============
