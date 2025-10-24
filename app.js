@@ -248,13 +248,36 @@ async function prepareForNextBottle() {
   }
   
   // Publish updated bottle count
-  mqttClient.publish(CONFIG.mqtt.topics.bottleCount, JSON.stringify({
+  const bottleCountData = {
     deviceId: CONFIG.device.id,
     userId: state.currentUserId,
     sessionId: state.sessionId,
     bottleCount: state.bottleCount,
     timestamp: new Date().toISOString()
-  }));
+  };
+  
+  console.log('📤 Publishing bottle count:');
+  console.log(`   MQTT Topic: ${CONFIG.mqtt.topics.bottleCount}`);
+  console.log(`   Count: ${state.bottleCount}`);
+  
+  // Send via MQTT
+  mqttClient.publish(CONFIG.mqtt.topics.bottleCount, JSON.stringify(bottleCountData), (err) => {
+    if (err) {
+      console.error('❌ Failed to publish bottle count to MQTT:', err);
+    } else {
+      console.log('✅ Bottle count published to MQTT');
+    }
+  });
+  
+  // Send via WebSocket to HTML
+  if (state.ws && state.ws.readyState === 1) {  // 1 = OPEN
+    const wsMessage = {
+      function: 'bottleCount',
+      data: state.bottleCount
+    };
+    state.ws.send(JSON.stringify(wsMessage));
+    console.log('✅ Bottle count sent via WebSocket to HTML\n');
+  }
   
   console.log('========================================');
   console.log('✅ READY FOR NEXT BOTTLE');
@@ -500,6 +523,20 @@ function connectWebSocket() {
         return;
       }
       
+      // ============ NEW: Handle finish recycle from HTML ============
+      if (message.function === 'finishRecycle') {
+        console.log('\n🏁 FINISH RECYCLE received from HTML via WebSocket!');
+        console.log('Data:', message.data);
+        
+        if (!state.sessionActive || state.bottleCount === 0) {
+          console.log('⚠️ No active session to finish');
+          return;
+        }
+        
+        await completeRecycleSession();
+        return;
+      }
+      
       if (message.function === '01') {
         state.moduleId = message.moduleId || message.data;
         console.log(`🔧 Module ID: ${state.moduleId}\n`);
@@ -701,13 +738,33 @@ mqttClient.on('message', async (topic, message) => {
       }, CONFIG.timing.autoPhotoDelay);
       
       // Publish initial bottle count (0)
-      mqttClient.publish(CONFIG.mqtt.topics.bottleCount, JSON.stringify({
+      console.log('📤 Publishing initial bottle count (0)');
+      
+      const initialCountData = {
         deviceId: CONFIG.device.id,
         userId: state.currentUserId,
         sessionId: state.sessionId,
         bottleCount: 0,
         timestamp: new Date().toISOString()
-      }));
+      };
+      
+      mqttClient.publish(CONFIG.mqtt.topics.bottleCount, JSON.stringify(initialCountData), (err) => {
+        if (err) {
+          console.error('❌ Failed to publish initial bottle count to MQTT:', err);
+        } else {
+          console.log('✅ Initial bottle count (0) published to MQTT');
+        }
+      });
+      
+      // Send via WebSocket to HTML
+      if (state.ws && state.ws.readyState === 1) {
+        const wsMessage = {
+          function: 'bottleCount',
+          data: 0
+        };
+        state.ws.send(JSON.stringify(wsMessage));
+        console.log('✅ Initial bottle count (0) sent via WebSocket to HTML\n');
+      }
       
       return;
     }
@@ -797,6 +854,32 @@ function gracefulShutdown() {
 }
 
 process.on('SIGINT', gracefulShutdown);
+
+// ============ KEYBOARD INPUT FOR MANUAL FINISH ============
+const readline = require('readline');
+readline.emitKeypressEvents(process.stdin);
+if (process.stdin.isTTY) {
+  process.stdin.setRawMode(true);
+}
+
+console.log('\n💡 TIP: Press "F" key anytime to manually FINISH current session\n');
+
+process.stdin.on('keypress', async (str, key) => {
+  if (key && key.name === 'f') {
+    console.log('\n⌨️  KEYBOARD FINISH triggered!');
+    if (state.sessionActive && state.bottleCount > 0) {
+      await completeRecycleSession();
+    } else if (!state.sessionActive) {
+      console.log('⚠️  No active session to finish');
+    } else if (state.bottleCount === 0) {
+      console.log('⚠️  No bottles recycled yet (count: 0)');
+    }
+  }
+  
+  if (key && key.ctrl && key.name === 'c') {
+    gracefulShutdown();
+  }
+});
 
 console.log('========================================');
 console.log('🚀 RVM AGENT - MULTI-BOTTLE SESSION');

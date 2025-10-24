@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0" />
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
     <title>RVM-3101 QR Scanner - Multi-Bottle</title>
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -439,14 +438,8 @@
                 validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
                 timeout: 10000
             },
-            mqtt: {
-                brokerUrl: 'wss://mqtt.ceewen.xyz:8884/mqtt',
-                username: 'mqttuser',
-                password: 'mqttUser@2025',
-                topics: {
-                    finishRecycle: 'rvm/RVM-3101/recycle/finish',
-                    bottleCount: 'rvm/RVM-3101/bottle/count'
-                }
+            websocket: {
+                url: 'ws://localhost:8081/websocket/qazwsx1234'
             },
             qr: {
                 minLength: 10,
@@ -462,7 +455,7 @@
             isProcessing: false,
             sessionActive: false,
             bottleCount: 0,
-            mqttClient: null,
+            ws: null,  // WebSocket connection
             stats: {
                 total: 0,
                 success: 0,
@@ -485,35 +478,51 @@
             finishButton: document.getElementById('finishButton')
         };
 
-        // ============ MQTT CONNECTION ============
-        function connectMQTT() {
-            console.log('🔌 Connecting to MQTT...');
+        // ============ WEBSOCKET CONNECTION (Same as Agent) ============
+        function connectWebSocket() {
+            console.log('🔌 Connecting to WebSocket...');
+            console.log('📡 WebSocket URL:', CONFIG.websocket.url);
             
-            state.mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
-                username: CONFIG.mqtt.username,
-                password: CONFIG.mqtt.password,
-                reconnectPeriod: 5000
-            });
+            try {
+                state.ws = new WebSocket(CONFIG.websocket.url);
 
-            state.mqttClient.on('connect', () => {
-                console.log('✅ MQTT Connected');
-                state.mqttClient.subscribe(CONFIG.mqtt.topics.bottleCount, (err) => {
-                    if (!err) {
-                        console.log('✅ Subscribed to bottle count updates');
+                state.ws.onopen = function() {
+                    console.log('✅ WebSocket Connected Successfully!');
+                };
+
+                state.ws.onmessage = function(e) {
+                    console.log('📨 WebSocket Message received:', e.data);
+                    
+                    try {
+                        const message = JSON.parse(e.data);
+                        console.log('📦 Parsed message:', message);
+                        
+                        // Listen for bottle count updates from agent
+                        if (message.function === 'bottleCount') {
+                            console.log('🔢 Bottle count update:', message.data);
+                            updateBottleCount(message.data);
+                        }
+                    } catch (err) {
+                        console.log('⚠️ Non-JSON message:', e.data);
                     }
-                });
-            });
+                };
 
-            state.mqttClient.on('message', (topic, message) => {
-                if (topic === CONFIG.mqtt.topics.bottleCount) {
-                    const data = JSON.parse(message.toString());
-                    updateBottleCount(data.bottleCount);
-                }
-            });
+                state.ws.onerror = function(error) {
+                    console.error('❌ WebSocket Error:', error);
+                };
 
-            state.mqttClient.on('error', (error) => {
-                console.error('❌ MQTT Error:', error);
-            });
+                state.ws.onclose = function() {
+                    console.log('⚠️ WebSocket Connection closed');
+                    // Reconnect after 5 seconds
+                    setTimeout(() => {
+                        console.log('🔄 Reconnecting WebSocket...');
+                        connectWebSocket();
+                    }, 5000);
+                };
+
+            } catch (error) {
+                console.error('❌ Failed to create WebSocket:', error);
+            }
         }
 
         // ============ UPDATE UI FUNCTIONS ============
@@ -563,8 +572,28 @@
         }
 
         // ============ FINISH RECYCLE FUNCTION ============
-        function finishRecycle() {
-            if (!state.sessionActive || state.bottleCount === 0) {
+        async function finishRecycle() {
+            console.log('🏁 Finish Recycle button clicked');
+            console.log('Session active:', state.sessionActive);
+            console.log('Bottle count:', state.bottleCount);
+            console.log('WebSocket connected:', state.ws && state.ws.readyState === WebSocket.OPEN);
+            
+            if (!state.sessionActive) {
+                console.log('⚠️ No active session');
+                alert('No active session to finish!');
+                return;
+            }
+            
+            if (state.bottleCount === 0) {
+                console.log('⚠️ No bottles recycled yet');
+                alert('No bottles recycled yet! Place at least one bottle first.');
+                return;
+            }
+
+            // Check WebSocket connection
+            if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+                console.error('❌ WebSocket not connected!');
+                alert('WebSocket not connected! Please refresh the page.');
                 return;
             }
 
@@ -572,31 +601,47 @@
             elements.finishButton.disabled = true;
             elements.finishButton.textContent = '⏳ Completing...';
 
-            // Publish finish message to MQTT
-            if (state.mqttClient && state.mqttClient.connected) {
-                state.mqttClient.publish(CONFIG.mqtt.topics.finishRecycle, JSON.stringify({
-                    deviceId: 'RVM-3101',
-                    timestamp: new Date().toISOString()
-                }), () => {
-                    console.log('✅ Finish recycle message sent');
-                });
-            }
+            try {
+                // Send finish message via WebSocket
+                const finishMessage = {
+                    function: 'finishRecycle',
+                    data: {
+                        deviceId: 'RVM-3101',
+                        bottleCount: state.bottleCount,
+                        timestamp: new Date().toISOString()
+                    }
+                };
+                
+                console.log('📤 Sending finish message via WebSocket:');
+                console.log(JSON.stringify(finishMessage, null, 2));
+                
+                state.ws.send(JSON.stringify(finishMessage));
+                console.log('✅ Finish message sent!');
 
-            // Show completion status
-            updateStatus(
-                '🎉',
-                'Session Complete!',
-                `Total: ${state.bottleCount} bottles recycled`,
-                'success'
-            );
+                // Show completion status
+                updateStatus(
+                    '🎉',
+                    'Session Complete!',
+                    `Total: ${state.bottleCount} bottles recycled`,
+                    'success'
+                );
 
-            // Reset UI after delay
-            setTimeout(() => {
-                hideSessionUI();
+                // Reset UI after delay
+                setTimeout(() => {
+                    hideSessionUI();
+                    elements.finishButton.disabled = false;
+                    elements.finishButton.textContent = '🏁 Complete Recycling Session';
+                    resetForNextScan();
+                }, 3000);
+
+            } catch (error) {
+                console.error('❌ Failed to send finish message:', error);
+                alert('Failed to finish session! Error: ' + error.message);
+                
+                // Re-enable button on error
                 elements.finishButton.disabled = false;
                 elements.finishButton.textContent = '🏁 Complete Recycling Session';
-                resetForNextScan();
-            }, 3000);
+            }
         }
 
         // ============ FOCUS MANAGEMENT ============
@@ -847,8 +892,8 @@
         // ============ CLEANUP ON PAGE UNLOAD ============
         window.addEventListener('beforeunload', () => {
             clearInterval(focusInterval);
-            if (state.mqttClient) {
-                state.mqttClient.end();
+            if (state.ws) {
+                state.ws.close();
             }
             console.log('🛑 Cleanup complete');
         });
@@ -861,9 +906,10 @@
         console.log(`🔐 Backend: ${CONFIG.backend.url}`);
         console.log('📱 Ready to scan QR codes');
         console.log('✅ Multi-bottle session support');
+        console.log('🔌 WebSocket: ws://localhost:8081/websocket/qazwsx1234');
         console.log('========================================');
 
-        connectMQTT();
+        connectWebSocket();
         elements.scanInput.focus();
     </script>
 </body>
