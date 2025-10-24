@@ -6,10 +6,11 @@
     <meta http-equiv="X-UA-Compatible" content="ie=edge" />
     <title>RVM-3101 - Industry Standard Recycling</title>
     
-    <!-- Load Paho MQTT Client -->
+    <!-- Load Paho MQTT Client with Fallback -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.min.js"></script>
     
     <style>
+        /* Your existing CSS remains the same */
         * {
             margin: 0;
             padding: 0;
@@ -541,6 +542,34 @@
             margin-right: 10px;
         }
 
+        /* Connection Status Banner */
+        .connection-banner {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 12px;
+            text-align: center;
+            font-weight: bold;
+            z-index: 10000;
+            transition: all 0.3s ease;
+        }
+
+        .connection-banner.connected {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .connection-banner.disconnected {
+            background: #f44336;
+            color: white;
+        }
+
+        .connection-banner.connecting {
+            background: #FF9800;
+            color: white;
+        }
+
         /* Responsive Design */
         @media (max-width: 768px) {
             .container {
@@ -571,6 +600,11 @@
     </style>
 </head>
 <body>
+    <!-- Connection Status Banner -->
+    <div id="connectionBanner" class="connection-banner disconnected" style="display: none;">
+        MQTT: Disconnected
+    </div>
+
     <div class="container">
         <!-- Header Section -->
         <div class="header">
@@ -680,6 +714,7 @@
                 <button class="debug-btn success" onclick="testMQTTConnection()">🔗 Test MQTT</button>
                 <button class="debug-btn" onclick="sendTestMessage()">📨 Send Test Message</button>
                 <button class="debug-btn danger" onclick="clearDebug()">🗑️ Clear Debug</button>
+                <button class="debug-btn" onclick="testBrokerConnection()">🧪 Test Broker</button>
             </div>
         </div>
     </div>
@@ -694,6 +729,11 @@
                     userInterface: 'rvm/RVM-3101/ui/state',
                     commands: 'rvm/RVM-3101/commands',
                     status: 'rvm/RVM-3101/status'
+                },
+                // ADD CREDENTIALS CONFIGURATION
+                credentials: {
+                    username: 'mqttuser',      // Replace with your actual username
+                    password: 'mqttUser@2025'  // Replace with your actual password
                 }
             },
             session: {
@@ -761,7 +801,10 @@
             mqttStatus: document.getElementById('mqttStatus'),
             sessionState: document.getElementById('sessionState'),
             lastMessage: document.getElementById('lastMessage'),
-            connectionTime: document.getElementById('connectionTime')
+            connectionTime: document.getElementById('connectionTime'),
+            
+            // Connection Banner
+            connectionBanner: document.getElementById('connectionBanner')
         };
 
         // ============ MQTT CONNECTION ============
@@ -769,13 +812,24 @@
             try {
                 console.log('🔌 Connecting to MQTT broker...');
                 updateDebugInfo('MQTT Status', 'Connecting...');
+                showConnectionBanner('connecting', 'Connecting to MQTT...');
                 
-                // Check if Paho is available
+                // Enhanced Paho MQTT check
                 if (typeof Paho === 'undefined') {
-                    throw new Error('Paho MQTT client not loaded. Check CDN connection.');
+                    throw new Error('Paho MQTT library not loaded. Check CDN connection.');
+                }
+                
+                if (!Paho.MQTT || typeof Paho.MQTT.Client === 'undefined') {
+                    throw new Error('Paho.MQTT.Client constructor not available.');
                 }
                 
                 const clientId = `webclient_${Date.now()}_${Math.random().toString(16).substr(2, 8)}`;
+                
+                console.log('Creating MQTT client with:', {
+                    brokerUrl: CONFIG.mqtt.brokerUrl,
+                    clientId: clientId,
+                    username: CONFIG.mqtt.credentials.username
+                });
                 
                 state.mqttClient = new Paho.MQTT.Client(
                     CONFIG.mqtt.brokerUrl,
@@ -785,57 +839,95 @@
                 state.mqttClient.onConnectionLost = (response) => {
                     console.log('❌ MQTT connection lost:', response.errorMessage);
                     updateDebugInfo('MQTT Status', 'Disconnected');
+                    showConnectionBanner('disconnected', 'MQTT Connection Lost');
                     updateStatus('❌', 'Connection Lost', 'Reconnecting...', MACHINE_STATES.IDLE);
+                    
+                    // Auto-reconnect after 5 seconds
                     setTimeout(connectMQTT, 5000);
                 };
 
                 state.mqttClient.onMessageArrived = (message) => {
                     try {
                         const payload = JSON.parse(message.payloadString);
-                        console.log('📩 MQTT Message:', message.destinationName, payload);
+                        console.log('📩 MQTT Message received:', message.destinationName, payload);
                         updateDebugInfo('Last Message', `${message.destinationName}: ${payload.type || 'message'}`);
                         handleMQTTMessage(message.destinationName, payload);
                     } catch (error) {
-                        console.error('❌ MQTT message error:', error);
-                        updateDebugInfo('Last Message', `Error: ${error.message}`);
+                        console.error('❌ MQTT message parsing error:', error);
+                        updateDebugInfo('Last Message', `Parse Error: ${error.message}`);
                     }
                 };
 
                 const options = {
                     onSuccess: () => {
-                        console.log('✅ MQTT connected successfully');
+                        console.log('✅ MQTT connected successfully!');
                         updateDebugInfo('MQTT Status', 'Connected');
+                        showConnectionBanner('connected', 'MQTT Connected');
                         state.connectionStartTime = new Date();
                         
-                        // Subscribe to topics
-                        state.mqttClient.subscribe(CONFIG.mqtt.topics.sessionUpdate);
-                        state.mqttClient.subscribe(CONFIG.mqtt.topics.userInterface);
-                        state.mqttClient.subscribe(CONFIG.mqtt.topics.status);
+                        // Subscribe to all topics
+                        Object.values(CONFIG.mqtt.topics).forEach(topic => {
+                            state.mqttClient.subscribe(topic);
+                            console.log('📡 Subscribed to:', topic);
+                        });
                         
-                        console.log('📡 Subscribed to topics');
                         updateStatus('✅', 'System Ready', 'Scan QR code to start', MACHINE_STATES.READY);
                     },
                     onFailure: (error) => {
-                        console.error('❌ MQTT connection failed:', error.errorMessage);
-                        updateDebugInfo('MQTT Status', `Failed: ${error.errorMessage}`);
-                        updateStatus('❌', 'Connection Failed', 'Retrying...', MACHINE_STATES.IDLE);
+                        console.error('❌ MQTT connection failed:', {
+                            errorMessage: error.errorMessage,
+                            errorCode: error.errorCode,
+                            brokerUrl: CONFIG.mqtt.brokerUrl
+                        });
+                        
+                        let errorMsg = error.errorMessage;
+                        if (error.errorCode === 5) {
+                            errorMsg = 'Authentication failed. Check username/password.';
+                        } else if (error.errorCode === 7) {
+                            errorMsg = 'WebSocket connection failed. Check broker URL and port.';
+                        }
+                        
+                        updateDebugInfo('MQTT Status', `Failed: ${errorMsg}`);
+                        showConnectionBanner('disconnected', `Connection Failed: ${errorMsg}`);
+                        updateStatus('❌', 'Connection Failed', errorMsg, MACHINE_STATES.IDLE);
+                        
+                        // Retry connection after 5 seconds
                         setTimeout(connectMQTT, 5000);
                     },
                     useSSL: true,
                     timeout: 10,
                     keepAliveInterval: 60,
                     reconnect: true,
-                    userName: 'mqttuser', // Add credentials if needed
-                    password: 'mqttUser@2025' // Add credentials if needed
+                    
+                    // ADD AUTHENTICATION CREDENTIALS
+                    userName: CONFIG.mqtt.credentials.username,
+                    password: CONFIG.mqtt.credentials.password
                 };
 
                 state.mqttClient.connect(options);
                 
             } catch (error) {
                 console.error('❌ MQTT setup error:', error);
-                updateDebugInfo('MQTT Status', `Error: ${error.message}`);
+                updateDebugInfo('MQTT Status', `Setup Error: ${error.message}`);
+                showConnectionBanner('disconnected', `Setup Error: ${error.message}`);
                 updateStatus('❌', 'Setup Error', error.message, MACHINE_STATES.IDLE);
+                
+                // Retry after 5 seconds
                 setTimeout(connectMQTT, 5000);
+            }
+        }
+
+        // ============ CONNECTION BANNER MANAGEMENT ============
+        function showConnectionBanner(status, message) {
+            elements.connectionBanner.textContent = `MQTT: ${message}`;
+            elements.connectionBanner.className = `connection-banner ${status}`;
+            elements.connectionBanner.style.display = 'block';
+            
+            // Auto-hide connected banner after 3 seconds
+            if (status === 'connected') {
+                setTimeout(() => {
+                    elements.connectionBanner.style.display = 'none';
+                }, 3000);
             }
         }
 
@@ -1201,6 +1293,36 @@
             console.log('🗑️ DEBUG: Cleared debug messages');
         }
 
+        // ============ BROKER TEST FUNCTION ============
+        function testBrokerConnection() {
+            console.log('🧪 Testing broker connection...');
+            
+            const testUrls = [
+                'wss://mqtt.ceewen.xyz:8884/mqtt',
+                'wss://mqtt.ceewen.xyz:8884',
+                'ws://mqtt.ceewen.xyz:8884/mqtt'
+            ];
+            
+            testUrls.forEach(url => {
+                console.log(`Testing URL: ${url}`);
+                const testClient = new Paho.MQTT.Client(url, 'test-client-' + Date.now());
+                
+                testClient.connect({
+                    onSuccess: () => {
+                        console.log(`✅ SUCCESS: ${url}`);
+                        testClient.disconnect();
+                    },
+                    onFailure: (error) => {
+                        console.log(`❌ FAILED: ${url} - ${error.errorMessage}`);
+                    },
+                    userName: CONFIG.mqtt.credentials.username,
+                    password: CONFIG.mqtt.credentials.password,
+                    useSSL: url.startsWith('wss://'),
+                    timeout: 5
+                });
+            });
+        }
+
         // ============ QR SCANNING ============
         function processQRCode(qrData) {
             if (state.isProcessing || state.currentSession) {
@@ -1332,32 +1454,49 @@
             console.log('✅ Enhanced Debugging');
             console.log('========================================');
 
-            // Connect to MQTT
-            connectMQTT();
+            // Wait for Paho MQTT to load
+            const checkPaho = setInterval(() => {
+                if (typeof Paho !== 'undefined' && Paho.MQTT && Paho.MQTT.Client) {
+                    clearInterval(checkPaho);
+                    console.log('✅ Paho MQTT loaded successfully');
+                    
+                    // Connect to MQTT
+                    connectMQTT();
 
-            // Start focus management
-            state.focusInterval = setInterval(ensureFocus, 100);
+                    // Start focus management
+                    state.focusInterval = setInterval(ensureFocus, 100);
 
-            // Start connection time updater
-            setInterval(updateConnectionTime, 1000);
+                    // Start connection time updater
+                    setInterval(updateConnectionTime, 1000);
 
-            // Focus input on start
-            elements.scanInput.focus();
-
-            // Set up event listeners
-            document.addEventListener('click', (e) => {
-                if (e.target !== elements.scanInput && !state.isProcessing && !state.currentSession) {
+                    // Focus input on start
                     elements.scanInput.focus();
-                }
-            });
 
-            document.addEventListener('visibilitychange', () => {
-                if (!document.hidden && !state.isProcessing && !state.currentSession) {
-                    elements.scanInput.focus();
-                }
-            });
+                    // Set up event listeners
+                    document.addEventListener('click', (e) => {
+                        if (e.target !== elements.scanInput && !state.isProcessing && !state.currentSession) {
+                            elements.scanInput.focus();
+                        }
+                    });
 
-            updateDebugInfo('Debug Status', 'Initialized');
+                    document.addEventListener('visibilitychange', () => {
+                        if (!document.hidden && !state.isProcessing && !state.currentSession) {
+                            elements.scanInput.focus();
+                        }
+                    });
+
+                    updateDebugInfo('Debug Status', 'Initialized');
+                }
+            }, 100);
+
+            // Timeout after 10 seconds
+            setTimeout(() => {
+                if (typeof Paho === 'undefined') {
+                    console.error('❌ Paho MQTT failed to load within 10 seconds');
+                    updateDebugInfo('MQTT Status', 'Error: Library load timeout');
+                    showConnectionBanner('disconnected', 'MQTT Library Failed to Load');
+                }
+            }, 10000);
         }
 
         // ============ CLEANUP ============
