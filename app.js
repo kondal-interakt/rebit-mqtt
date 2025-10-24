@@ -495,25 +495,30 @@ function connectWebSocket() {
     try {
       const message = JSON.parse(data.toString());
       
-      if (message.function === '11') {
-        state.moduleId = message.data;
-        console.log(`✅ Module ID: ${state.moduleId}\n`);
+      if (message.function === 'qrcode') {
+        console.log('📱 QR from local scanner:', message.data);
         return;
       }
       
-      if (message.function === '10') {
-        const aiData = message.data;
+      if (message.function === '01') {
+        state.moduleId = message.moduleId || message.data;
+        console.log(`🔧 Module ID: ${state.moduleId}\n`);
+        return;
+      }
+      
+      if (message.function === 'aiPhoto') {
+        const aiData = JSON.parse(message.data);
         const materialType = determineMaterialType(aiData);
         
         state.aiResult = {
           matchRate: Math.round((aiData.probability || 0) * 100),
           materialType: materialType,
           className: aiData.className || 'Unknown',
-          taskId: aiData.taskId || Date.now().toString(),
+          taskId: aiData.taskId || 'unknown',
           timestamp: new Date().toISOString()
         };
         
-        console.log(`🤖 AI: ${state.aiResult.className} (${state.aiResult.matchRate}%)`);
+        console.log(`🤖 AI: ${state.aiResult.materialType} (${state.aiResult.matchRate}%)`);
         
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
         
