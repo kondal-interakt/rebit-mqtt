@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>RVM-3101 QR Scanner - Multi-Bottle</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 600px;
+            width: 100%;
+            padding: 40px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 6px;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .device-id {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        /* Bottle Counter Display */
+        .bottle-counter {
+            display: none;
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            color: white;
+            padding: 25px;
+            border-radius: 15px;
+            margin-bottom: 25px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.3);
+            animation: slideDown 0.4s ease;
+        }
+
+        .bottle-counter.active {
+            display: block;
+        }
+
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .bottle-counter .count {
+            font-size: 48px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .bottle-counter .label {
+            font-size: 18px;
+            opacity: 0.9;
+        }
+
+        /* Finish Button */
+        .finish-button {
+            display: none;
+            width: 100%;
+            padding: 20px;
+            font-size: 20px;
+            font-weight: bold;
+            color: white;
+            background: linear-gradient(135deg, #f44336 0%, #e53935 100%);
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            margin-bottom: 25px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(244, 67, 54, 0.3);
+        }
+
+        .finish-button.active {
+            display: block;
+        }
+
+        .finish-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(244, 67, 54, 0.4);
+        }
+
+        .finish-button:active {
+            transform: translateY(-1px);
+        }
+
+        .finish-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status-card {
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 25px;
+            text-align: center;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .status-card.ready {
+            background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%);
+            border-color: #667eea;
+        }
+
+        .status-card.scanning {
+            background: linear-gradient(135deg, #ffd89b 0%, #19547b20 100%);
+            border-color: #ffa726;
+        }
+
+        .status-card.validating {
+            background: linear-gradient(135deg, #a8edea20 0%, #fed6e320 100%);
+            border-color: #4fc3f7;
+        }
+
+        .status-card.success {
+            background: linear-gradient(135deg, #d4f8e820 0%, #8fd3f420 100%);
+            border-color: #4caf50;
+        }
+
+        .status-card.error {
+            background: linear-gradient(135deg, #fce4ec20 0%, #f8bbd020 100%);
+            border-color: #f44336;
+        }
+
+        .status-card.recycling {
+            background: linear-gradient(135deg, #4caf5020 0%, #8bc34a20 100%);
+            border-color: #4caf50;
+        }
+
+        .status-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .status-text {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .status-subtext {
+            font-size: 14px;
+            color: #666;
+            margin-top: 8px;
+        }
+
+        #scanInput {
+            width: 100%;
+            padding: 18px;
+            font-size: 16px;
+            border: 3px solid #e0e0e0;
+            border-radius: 12px;
+            margin-bottom: 25px;
+            transition: all 0.3s ease;
+            text-align: center;
+            font-weight: 500;
+            letter-spacing: 2px;
+        }
+
+        #scanInput:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+        }
+
+        #scanInput:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        .scan-history {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .scan-history h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .clear-btn {
+            background: #f44336;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .clear-btn:hover {
+            background: #d32f2f;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(244, 67, 54, 0.3);
+        }
+
+        .scan-item {
+            background: white;
+            padding: 15px;
+            margin-bottom: 12px;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .scan-item.success {
+            border-left-color: #4caf50;
+        }
+
+        .scan-item.error {
+            border-left-color: #f44336;
+        }
+
+        .scan-code {
+            font-weight: 700;
+            color: #667eea;
+            font-size: 16px;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .scan-user {
+            color: #4caf50;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .scan-error {
+            color: #f44336;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .scan-time {
+            color: #999;
+            font-size: 12px;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .no-scans {
+            text-align: center;
+            color: #999;
+            padding: 30px;
+            font-size: 14px;
+        }
+
+        .scan-history::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .scan-history::-webkit-scrollbar-track {
+            background: #e0e0e0;
+            border-radius: 10px;
+        }
+
+        .scan-history::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 10px;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔄 RVM-3101</h1>
+        <div class="device-id">Multi-Bottle Recycling System</div>
+
+        <!-- Bottle Counter (shown during active session) -->
+        <div id="bottleCounter" class="bottle-counter">
+            <div class="count" id="bottleCount">0</div>
+            <div class="label">Bottles Recycled</div>
+        </div>
+
+        <!-- Finish Button (shown during active session) -->
+        <button id="finishButton" class="finish-button" onclick="finishRecycle()">
+            🏁 Complete Recycling Session
+        </button>
+
+        <!-- Status Display -->
+        <div id="statusCard" class="status-card ready">
+            <div class="status-icon" id="statusIcon">📱</div>
+            <div class="status-text" id="statusText">Ready to Scan</div>
+            <div class="status-subtext" id="statusSubtext">Place QR code near scanner</div>
+        </div>
+
+        <!-- Hidden Input Field -->
+        <input 
+            type="text" 
+            id="scanInput" 
+            placeholder="Scan QR Code..."
+            autocomplete="off"
+            autofocus
+        />
+
+        <!-- Scan History -->
+        <div class="scan-history" id="scanHistory">
+            <h3>
+                Recent Scans
+                <button class="clear-btn" onclick="clearHistory()">Clear</button>
+            </h3>
+            <div class="no-scans">No scans yet. Start scanning QR codes!</div>
+        </div>
+
+        <!-- Statistics -->
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="totalScans">0</div>
+                <div class="stat-label">Total Scans</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="successScans" style="color: #4caf50;">0</div>
+                <div class="stat-label">Successful</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="failedScans" style="color: #f44336;">0</div>
+                <div class="stat-label">Failed</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            backend: {
+                url: 'https://rebit-api.ceewen.xyz',
+                validateEndpoint: '/api/rvm/RVM-3101/qr/validate',
+                timeout: 10000
+            },
+            mqtt: {
+                brokerUrl: 'wss://mqtt.ceewen.xyz:8884/mqtt',
+                username: 'mqttuser',
+                password: 'mqttUser@2025',
+                topics: {
+                    finishRecycle: 'rvm/RVM-3101/recycle/finish',
+                    bottleCount: 'rvm/RVM-3101/bottle/count'
+                }
+            },
+            qr: {
+                minLength: 10,
+                maxLength: 50,
+                scanDelay: 300
+            }
+        };
+
+        const state = {
+            qrBuffer: '',
+            lastKeyTime: 0,
+            scanTimer: null,
+            isProcessing: false,
+            sessionActive: false,
+            bottleCount: 0,
+            mqttClient: null,
+            stats: {
+                total: 0,
+                success: 0,
+                failed: 0
+            }
+        };
+
+        const elements = {
+            scanInput: document.getElementById('scanInput'),
+            statusCard: document.getElementById('statusCard'),
+            statusIcon: document.getElementById('statusIcon'),
+            statusText: document.getElementById('statusText'),
+            statusSubtext: document.getElementById('statusSubtext'),
+            scanHistory: document.getElementById('scanHistory'),
+            totalScans: document.getElementById('totalScans'),
+            successScans: document.getElementById('successScans'),
+            failedScans: document.getElementById('failedScans'),
+            bottleCounter: document.getElementById('bottleCounter'),
+            bottleCount: document.getElementById('bottleCount'),
+            finishButton: document.getElementById('finishButton')
+        };
+
+        // ============ MQTT CONNECTION ============
+        function connectMQTT() {
+            console.log('🔌 Connecting to MQTT...');
+            
+            state.mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
+                username: CONFIG.mqtt.username,
+                password: CONFIG.mqtt.password,
+                reconnectPeriod: 5000
+            });
+
+            state.mqttClient.on('connect', () => {
+                console.log('✅ MQTT Connected');
+                state.mqttClient.subscribe(CONFIG.mqtt.topics.bottleCount, (err) => {
+                    if (!err) {
+                        console.log('✅ Subscribed to bottle count updates');
+                    }
+                });
+            });
+
+            state.mqttClient.on('message', (topic, message) => {
+                if (topic === CONFIG.mqtt.topics.bottleCount) {
+                    const data = JSON.parse(message.toString());
+                    updateBottleCount(data.bottleCount);
+                }
+            });
+
+            state.mqttClient.on('error', (error) => {
+                console.error('❌ MQTT Error:', error);
+            });
+        }
+
+        // ============ UPDATE UI FUNCTIONS ============
+        function updateStatus(icon, text, subtext, statusClass) {
+            elements.statusIcon.textContent = icon;
+            elements.statusText.textContent = text;
+            elements.statusSubtext.textContent = subtext;
+            
+            elements.statusCard.className = 'status-card ' + statusClass;
+        }
+
+        function updateBottleCount(count) {
+            state.bottleCount = count;
+            elements.bottleCount.textContent = count;
+            
+            if (count > 0) {
+                elements.bottleCount.classList.add('pulse');
+                setTimeout(() => {
+                    elements.bottleCount.classList.remove('pulse');
+                }, 1000);
+            }
+        }
+
+        function showSessionUI() {
+            state.sessionActive = true;
+            elements.bottleCounter.classList.add('active');
+            elements.finishButton.classList.add('active');
+            updateStatus(
+                '♻️',
+                'Recycling Active',
+                'Place bottles one by one',
+                'recycling'
+            );
+        }
+
+        function hideSessionUI() {
+            state.sessionActive = false;
+            elements.bottleCounter.classList.remove('active');
+            elements.finishButton.classList.remove('active');
+            updateBottleCount(0);
+            updateStatus(
+                '📱',
+                'Ready to Scan',
+                'Place QR code near scanner',
+                'ready'
+            );
+        }
+
+        // ============ FINISH RECYCLE FUNCTION ============
+        function finishRecycle() {
+            if (!state.sessionActive || state.bottleCount === 0) {
+                return;
+            }
+
+            // Disable button temporarily
+            elements.finishButton.disabled = true;
+            elements.finishButton.textContent = '⏳ Completing...';
+
+            // Publish finish message to MQTT
+            if (state.mqttClient && state.mqttClient.connected) {
+                state.mqttClient.publish(CONFIG.mqtt.topics.finishRecycle, JSON.stringify({
+                    deviceId: 'RVM-3101',
+                    timestamp: new Date().toISOString()
+                }), () => {
+                    console.log('✅ Finish recycle message sent');
+                });
+            }
+
+            // Show completion status
+            updateStatus(
+                '🎉',
+                'Session Complete!',
+                `Total: ${state.bottleCount} bottles recycled`,
+                'success'
+            );
+
+            // Reset UI after delay
+            setTimeout(() => {
+                hideSessionUI();
+                elements.finishButton.disabled = false;
+                elements.finishButton.textContent = '🏁 Complete Recycling Session';
+                resetForNextScan();
+            }, 3000);
+        }
+
+        // ============ FOCUS MANAGEMENT ============
+        const focusInterval = setInterval(() => {
+            if (document.activeElement !== elements.scanInput && !state.isProcessing) {
+                elements.scanInput.focus();
+            }
+        });
+
+        // ============ QR VALIDATION ============
+        async function validateQRCode(sessionCode) {
+            const url = `${CONFIG.backend.url}${CONFIG.backend.validateEndpoint}`;
+            
+            console.log('🔐 Validating QR Code:', sessionCode);
+            
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ sessionCode }),
+                    signal: AbortSignal.timeout(CONFIG.backend.timeout)
+                });
+
+                const data = await response.json();
+                
+                console.log('Response:', data);
+
+                if (data.success) {
+                    return {
+                        valid: true,
+                        user: data.user || {},
+                        data: data
+                    };
+                } else {
+                    return {
+                        valid: false,
+                        error: data.error || 'Invalid QR Code'
+                    };
+                }
+
+            } catch (error) {
+                console.error('❌ Validation Error:', error);
+                
+                if (error.name === 'TimeoutError') {
+                    return { valid: false, error: 'Request timeout' };
+                }
+                
+                return {
+                    valid: false,
+                    error: error.message || 'Network error'
+                };
+            }
+        }
+
+        // ============ SCAN PROCESSING ============
+        async function processQRCode(qrData) {
+            if (state.isProcessing) {
+                console.log('⏳ Already processing a scan');
+                return;
+            }
+
+            // Don't allow new scan if session is active
+            if (state.sessionActive) {
+                console.log('⚠️ Session already active');
+                return;
+            }
+
+            state.isProcessing = true;
+            elements.scanInput.disabled = true;
+            
+            const cleanCode = qrData.replace('Enter', '').trim();
+
+            if (cleanCode.length < CONFIG.qr.minLength || cleanCode.length > CONFIG.qr.maxLength) {
+                console.log('❌ Invalid QR code length:', cleanCode.length);
+                addScanToHistory(cleanCode, false, `Invalid length (${cleanCode.length} chars)`);
+                resetForNextScan();
+                return;
+            }
+
+            if (!/^\d+$/.test(cleanCode)) {
+                console.log('❌ QR code must be numeric only');
+                addScanToHistory(cleanCode, false, 'Must be numeric only');
+                resetForNextScan();
+                return;
+            }
+
+            updateStatus(
+                '<div class="loading-spinner"></div>',
+                'Validating QR Code',
+                `Checking code: ${cleanCode}`,
+                'validating'
+            );
+
+            const result = await validateQRCode(cleanCode);
+
+            if (result.valid) {
+                state.stats.success++;
+                showSessionUI();
+                addScanToHistory(cleanCode, true, result.user);
+
+            } else {
+                state.stats.failed++;
+                updateStatus(
+                    '❌',
+                    'Validation Failed',
+                    result.error || 'Invalid QR code',
+                    'error'
+                );
+                
+                addScanToHistory(cleanCode, false, result.error);
+
+                setTimeout(() => {
+                    resetForNextScan();
+                }, 3000);
+            }
+        }
+
+        function resetForNextScan() {
+            console.log('🔄 Resetting for next scan');
+            
+            state.qrBuffer = '';
+            elements.scanInput.value = '';
+            state.isProcessing = false;
+            elements.scanInput.disabled = false;
+            
+            if (!state.sessionActive) {
+                updateStatus(
+                    '📱',
+                    'Ready to Scan',
+                    'Place QR code near scanner',
+                    'ready'
+                );
+            }
+            
+            setTimeout(() => {
+                elements.scanInput.focus();
+                console.log('✅ Ready for next scan');
+            }, 100);
+        }
+
+        // ============ HISTORY MANAGEMENT ============
+        function addScanToHistory(code, success, info) {
+            state.stats.total++;
+            updateStats();
+
+            const noScans = elements.scanHistory.querySelector('.no-scans');
+            if (noScans) {
+                noScans.remove();
+            }
+
+            const scanItem = document.createElement('div');
+            scanItem.className = `scan-item ${success ? 'success' : 'error'}`;
+            
+            const userName = success && info.name 
+                ? info.name 
+                : (success && info.username ? info.username : 'Unknown');
+            
+            const userInfo = success 
+                ? `<div class="scan-user">👤 User: ${userName}</div>`
+                : '';
+            
+            const errorInfo = !success 
+                ? `<div class="scan-error">❌ ${info}</div>`
+                : '';
+
+            scanItem.innerHTML = `
+                <div class="scan-code">${success ? '✓' : '✗'} ${code}</div>
+                ${userInfo}
+                ${errorInfo}
+                <div class="scan-time">⏰ ${new Date().toLocaleString()}</div>
+            `;
+
+            elements.scanHistory.insertBefore(scanItem, elements.scanHistory.firstChild);
+
+            const items = elements.scanHistory.querySelectorAll('.scan-item');
+            if (items.length > 10) {
+                items[items.length - 1].remove();
+            }
+        }
+
+        function updateStats() {
+            elements.totalScans.textContent = state.stats.total;
+            elements.successScans.textContent = state.stats.success;
+            elements.failedScans.textContent = state.stats.failed;
+        }
+
+        function clearHistory() {
+            elements.scanHistory.innerHTML = '<div class="no-scans">No scans yet. Start scanning QR codes!</div>';
+            state.stats = { total: 0, success: 0, failed: 0 };
+            updateStats();
+        }
+
+        // ============ KEYBOARD INPUT HANDLING ============
+        elements.scanInput.addEventListener('keydown', function(event) {
+            if (state.isProcessing) {
+                event.preventDefault();
+                return;
+            }
+
+            const currentTime = Date.now();
+            const timeDiff = currentTime - state.lastKeyTime;
+
+            if (timeDiff > 100) {
+                state.qrBuffer = '';
+            }
+
+            state.lastKeyTime = currentTime;
+
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation();
+
+                if (state.scanTimer) {
+                    clearTimeout(state.scanTimer);
+                }
+
+                if (state.qrBuffer.length > 0) {
+                    console.log('📱 QR Scan detected:', state.qrBuffer);
+                    updateStatus(
+                        '🔄',
+                        'Processing Scan',
+                        'Please wait...',
+                        'scanning'
+                    );
+                    processQRCode(state.qrBuffer);
+                }
+            } else {
+                state.qrBuffer += event.key;
+                elements.scanInput.value = state.qrBuffer;
+
+                if (state.scanTimer) {
+                    clearTimeout(state.scanTimer);
+                }
+
+                if (state.qrBuffer.length >= CONFIG.qr.minLength) {
+                    state.scanTimer = setTimeout(() => {
+                        if (state.qrBuffer.length > 0 && !state.isProcessing) {
+                            console.log('📱 QR Scan completed (timeout):', state.qrBuffer);
+                            processQRCode(state.qrBuffer);
+                        }
+                    }, CONFIG.qr.scanDelay);
+                }
+            }
+        });
+
+        // ============ CLEANUP ON PAGE UNLOAD ============
+        window.addEventListener('beforeunload', () => {
+            clearInterval(focusInterval);
+            if (state.mqttClient) {
+                state.mqttClient.end();
+            }
+            console.log('🛑 Cleanup complete');
+        });
+
+        // ============ INITIALIZE ============
+        console.log('========================================');
+        console.log('🚀 RVM-3101 QR Scanner - Multi-Bottle');
+        console.log('========================================');
+        console.log('✅ Scanner initialized');
+        console.log(`🔐 Backend: ${CONFIG.backend.url}`);
+        console.log('📱 Ready to scan QR codes');
+        console.log('✅ Multi-bottle session support');
+        console.log('========================================');
+
+        connectMQTT();
+        elements.scanInput.focus();
+    </script>
+</body>
+</html>
