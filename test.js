@@ -61,7 +61,9 @@ const CONFIG = {
   detection: {
     METAL_CAN: 0.22,
     PLASTIC_BOTTLE: 0.30,
-    GLASS: 0.25
+    GLASS: 0.25,
+    retryDelay: 2000,        // 2 seconds between retries
+    maxRetries: 3            // Maximum retry attempts
   },
   
   timing: {
@@ -105,7 +107,12 @@ const state = {
   itemsProcessed: 0,
   sessionStartTime: null,
   
-  autoPhotoTimer: null
+  autoPhotoTimer: null,
+  
+  // Detection retry tracking
+  detectionRetries: 0,
+  maxDetectionRetries: 3,
+  awaitingDetection: false
 };
 
 // ============================================
@@ -119,24 +126,44 @@ function determineMaterialType(aiData) {
   
   let materialType = 'UNKNOWN';
   let threshold = 1.0;
+  let hasStrongKeyword = false;
   
+  // Check for metal can indicators
   if (className.includes('易拉罐') || className.includes('metal') || 
       className.includes('can') || className.includes('铝')) {
     materialType = 'METAL_CAN';
     threshold = CONFIG.detection.METAL_CAN;
-  } else if (className.includes('pet') || className.includes('plastic') || 
-             className.includes('瓶') || className.includes('bottle')) {
+    // Strong keyword match if contains specific metal can terms
+    hasStrongKeyword = className.includes('易拉罐') || className.includes('铝');
+  } 
+  // Check for plastic bottle indicators
+  else if (className.includes('pet') || className.includes('plastic') || 
+           className.includes('瓶') || className.includes('bottle')) {
     materialType = 'PLASTIC_BOTTLE';
     threshold = CONFIG.detection.PLASTIC_BOTTLE;
-  } else if (className.includes('玻璃') || className.includes('glass')) {
+    // Strong keyword match if contains PET (common in barcodes/labels)
+    hasStrongKeyword = className.includes('pet');
+  } 
+  // Check for glass indicators
+  else if (className.includes('玻璃') || className.includes('glass')) {
     materialType = 'GLASS';
     threshold = CONFIG.detection.GLASS;
+    hasStrongKeyword = className.includes('玻璃');
   }
   
   const confidencePercent = Math.round(probability * 100);
   const thresholdPercent = Math.round(threshold * 100);
   
+  // If material type detected but confidence too low
   if (materialType !== 'UNKNOWN' && probability < threshold) {
+    // Use relaxed threshold if we have strong keyword match
+    const relaxedThreshold = threshold * 0.3; // 30% of original threshold
+    
+    if (hasStrongKeyword && probability >= relaxedThreshold) {
+      console.log(`✅ ${materialType} detected via keyword match (${confidencePercent}% confidence, relaxed threshold)`);
+      return materialType;
+    }
+    
     console.log(`⚠️ ${materialType} detected but confidence too low (${confidencePercent}% < ${thresholdPercent}%)`);
     return 'UNKNOWN';
   }
@@ -228,6 +255,68 @@ async function executeCommand(action, params = {}) {
 }
 
 // ============================================
+// REJECTION HANDLING
+// ============================================
+async function executeRejectionCycle() {
+  console.log('\n========================================');
+  console.log('❌ REJECTION CYCLE - UNRECOGNIZED ITEM');
+  console.log('========================================\n');
+
+  try {
+    // 1. Move item through system without sorting
+    console.log('🎯 Step 1: Belt → Stepper (rejection path)');
+    await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
+    await delay(CONFIG.timing.beltToStepper);
+    await executeCommand('customMotor', CONFIG.motors.belt.stop);
+    console.log('✅ Step 1 complete\n');
+
+    // 2. Keep stepper at home (reject all unrecognized)
+    console.log('🎯 Step 2: Stepper remains at home');
+    await delay(CONFIG.timing.positionSettle);
+    console.log('✅ Step 2 complete\n');
+
+    // 3. Reverse belt to drop into reject bin
+    console.log('🎯 Step 3: Reverse Belt (to reject bin)');
+    await executeCommand('customMotor', CONFIG.motors.belt.reverse);
+    await delay(CONFIG.timing.beltReverse);
+    await executeCommand('customMotor', CONFIG.motors.belt.stop);
+    console.log('✅ Step 3 complete\n');
+
+    console.log('========================================');
+    console.log('✅ REJECTION CYCLE COMPLETE');
+    console.log('========================================\n');
+
+    // Publish rejection event
+    const rejectionData = {
+      deviceId: CONFIG.device.id,
+      reason: 'LOW_CONFIDENCE',
+      userId: state.currentUserId || null,
+      sessionId: state.sessionId || null,
+      sessionCode: state.sessionCode || null,
+      isGuest: state.isGuestSession,
+      timestamp: new Date().toISOString()
+    };
+    
+    mqttClient.publish('rvm/RVM-3101/item/rejected', JSON.stringify(rejectionData));
+
+  } catch (error) {
+    console.error('❌ Rejection cycle error:', error.message);
+  }
+
+  // Reset detection state
+  state.aiResult = null;
+  state.weight = null;
+  state.detectionRetries = 0;
+  state.awaitingDetection = false;
+  state.cycleInProgress = false;
+
+  // Ready for next item
+  if (state.autoCycleEnabled) {
+    console.log('🔄 Ready for next item...\n');
+  }
+}
+
+// ============================================
 // SESSION MANAGEMENT
 // ============================================
 async function startSession(isMember, sessionData) {
@@ -262,6 +351,8 @@ async function startSession(isMember, sessionData) {
   state.autoCycleEnabled = true;
   state.itemsProcessed = 0;
   state.sessionStartTime = new Date();
+  state.detectionRetries = 0;
+  state.awaitingDetection = false;
   
   // Reset system
   console.log('🔧 Resetting system...');
@@ -286,6 +377,7 @@ async function startSession(isMember, sessionData) {
   
   state.autoPhotoTimer = setTimeout(() => {
     console.log('📸 AUTO PHOTO!\n');
+    state.awaitingDetection = true;
     executeCommand('takePhoto');
   }, CONFIG.timing.autoPhotoDelay);
 }
@@ -332,6 +424,8 @@ async function resetSystemForNextUser() {
   state.isGuestSession = false;
   state.itemsProcessed = 0;
   state.sessionStartTime = null;
+  state.detectionRetries = 0;
+  state.awaitingDetection = false;
   
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
@@ -430,6 +524,8 @@ async function executeAutoCycle() {
   state.weight = null;
   state.calibrationAttempts = 0;
   state.cycleInProgress = false;
+  state.detectionRetries = 0;
+  state.awaitingDetection = false;
 
   // ✅ Keep session active for next item
   if (state.autoCycleEnabled) {
@@ -479,15 +575,33 @@ function connectWebSocket() {
         
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
         
-        if (state.autoCycleEnabled && state.aiResult.materialType !== 'UNKNOWN') {
-          const threshold = CONFIG.detection[state.aiResult.materialType];
-          const thresholdPercent = Math.round(threshold * 100);
-          
-          if (state.aiResult.matchRate >= thresholdPercent) {
-            console.log('✅ Proceeding to weight...\n');
+        // Handle detection result
+        if (state.autoCycleEnabled && state.awaitingDetection) {
+          if (state.aiResult.materialType !== 'UNKNOWN') {
+            // Success! Proceed to weight
+            console.log('✅ Material identified, proceeding to weight...\n');
+            state.detectionRetries = 0;
+            state.awaitingDetection = false;
             setTimeout(() => executeCommand('getWeight'), 500);
           } else {
-            console.log(`⚠️ Low confidence (${state.aiResult.matchRate}% < ${thresholdPercent}%)\n`);
+            // Unknown material
+            state.detectionRetries++;
+            console.log(`⚠️ UNKNOWN material (Attempt ${state.detectionRetries}/${CONFIG.detection.maxRetries})\n`);
+            
+            if (state.detectionRetries < CONFIG.detection.maxRetries) {
+              // Retry photo capture
+              console.log(`🔄 Retrying photo in ${CONFIG.detection.retryDelay/1000} seconds...\n`);
+              setTimeout(() => {
+                console.log('📸 RETRY PHOTO!\n');
+                executeCommand('takePhoto');
+              }, CONFIG.detection.retryDelay);
+            } else {
+              // Max retries reached, reject item
+              console.log('❌ Max retries reached, rejecting item...\n');
+              state.awaitingDetection = false;
+              state.cycleInProgress = true;
+              setTimeout(() => executeRejectionCycle(), 1000);
+            }
           }
         }
         return;
@@ -533,8 +647,11 @@ function connectWebSocket() {
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
         
-        if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress) {
+        if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress && !state.awaitingDetection) {
           console.log('👤 OBJECT DETECTED!\n');
+          state.awaitingDetection = true;
+          state.detectionRetries = 0;
+          
           if (state.autoPhotoTimer) {
             clearTimeout(state.autoPhotoTimer);
             state.autoPhotoTimer = null;
@@ -676,6 +793,8 @@ mqttClient.on('message', async (topic, message) => {
         await executeCommand('customMotor', CONFIG.motors.compactor.stop);
         state.autoCycleEnabled = false;
         state.cycleInProgress = false;
+        state.awaitingDetection = false;
+        state.detectionRetries = 0;
         return;
       }
       
@@ -691,6 +810,8 @@ mqttClient.on('message', async (topic, message) => {
           clearTimeout(state.autoPhotoTimer);
           state.autoPhotoTimer = null;
         }
+        state.awaitingDetection = true;
+        state.detectionRetries = 0;
         await executeCommand('takePhoto');
         return;
       }
@@ -706,6 +827,9 @@ mqttClient.on('message', async (topic, message) => {
             timestamp: new Date().toISOString()
           };
           console.log(`🔧 Manual: ${payload.materialType}`);
+          
+          state.detectionRetries = 0;
+          state.awaitingDetection = false;
           
           if (state.autoCycleEnabled) {
             setTimeout(() => executeCommand('getWeight'), 500);
@@ -766,5 +890,7 @@ console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
 console.log('✅ Member: QR → Multiple items');
 console.log('✅ Guest: No QR → Multiple items');
+console.log('✅ Retry: 3 attempts for low confidence');
+console.log('✅ Reject: Auto-reject unrecognized items');
 console.log('========================================');
 console.log('⏳ Starting...\n');
