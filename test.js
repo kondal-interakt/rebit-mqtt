@@ -196,6 +196,8 @@ async function executeCommand(action, params = {}) {
     case 'closeGate':
       apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
       apiPayload = { moduleId: state.moduleId, motorId: '01', type: '00', deviceType };
+      // Log who's closing the gate to help debug
+      console.log('⚠️ GATE CLOSING - Stack trace:', new Error().stack);
       break;
       
     case 'getWeight':
@@ -313,6 +315,12 @@ async function executeRejectionCycle() {
   // Ready for next item
   if (state.autoCycleEnabled) {
     console.log('🔄 Ready for next item...\n');
+    
+    // Ensure gate is open for next item
+    console.log('🚪 Ensuring gate is open for next item...');
+    await executeCommand('openGate');
+    await delay(CONFIG.timing.gateOperation);
+    console.log('✅ Gate confirmed open, ready for next bottle!\n');
   }
 }
 
@@ -531,7 +539,12 @@ async function executeAutoCycle() {
   if (state.autoCycleEnabled) {
     console.log('🔄 Ready for next item (session still active)...\n');
     console.log(`📊 Session stats: ${state.itemsProcessed} items processed\n`);
-    // Gate remains open, system ready for next bottle
+    
+    // Ensure gate is open for next item
+    console.log('🚪 Ensuring gate is open for next item...');
+    await executeCommand('openGate');
+    await delay(CONFIG.timing.gateOperation);
+    console.log('✅ Gate confirmed open, ready for next bottle!\n');
   }
 }
 
