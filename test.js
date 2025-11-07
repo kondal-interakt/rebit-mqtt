@@ -196,8 +196,6 @@ async function executeCommand(action, params = {}) {
     case 'closeGate':
       apiUrl = `${CONFIG.local.baseUrl}/system/serial/motorSelect`;
       apiPayload = { moduleId: state.moduleId, motorId: '01', type: '00', deviceType };
-      // Log who's closing the gate to help debug
-      console.log('⚠️ GATE CLOSING - Stack trace:', new Error().stack);
       break;
       
     case 'getWeight':
@@ -265,24 +263,14 @@ async function executeRejectionCycle() {
   console.log('========================================\n');
 
   try {
-    // 1. Move item through system without sorting
-    console.log('🎯 Step 1: Belt → Stepper (rejection path)');
-    await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
-    await delay(CONFIG.timing.beltToStepper);
-    await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    console.log('✅ Step 1 complete\n');
-
-    // 2. Keep stepper at home (reject all unrecognized)
-    console.log('🎯 Step 2: Stepper remains at home');
-    await delay(CONFIG.timing.positionSettle);
-    console.log('✅ Step 2 complete\n');
-
-    // 3. Reverse belt to drop into reject bin
-    console.log('🎯 Step 3: Reverse Belt (to reject bin)');
+    // Reject items are dropped early - reverse belt immediately
+    // Don't move forward to stepper for rejected items
+    
+    console.log('🎯 Reversing belt to reject bin (item rejected before sorting)');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    console.log('✅ Step 3 complete\n');
+    console.log('✅ Item dropped into reject bin\n');
 
     console.log('========================================');
     console.log('✅ REJECTION CYCLE COMPLETE');
@@ -321,6 +309,20 @@ async function executeRejectionCycle() {
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate confirmed open, ready for next bottle!\n');
+    
+    // 🔧 CRITICAL: Restart auto photo timer for next bottle
+    if (state.autoPhotoTimer) {
+      clearTimeout(state.autoPhotoTimer);
+    }
+    
+    console.log('⏱️  Auto photo timer set (5s fallback)...\n');
+    state.autoPhotoTimer = setTimeout(() => {
+      if (!state.cycleInProgress && !state.awaitingDetection) {
+        console.log('📸 AUTO PHOTO (timer fallback)!\n');
+        state.awaitingDetection = true;
+        executeCommand('takePhoto');
+      }
+    }, CONFIG.timing.autoPhotoDelay);
   }
 }
 
@@ -554,6 +556,20 @@ async function executeAutoCycle() {
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate confirmed open, ready for next bottle!\n');
+    
+    // 🔧 CRITICAL: Restart auto photo timer for next bottle
+    if (state.autoPhotoTimer) {
+      clearTimeout(state.autoPhotoTimer);
+    }
+    
+    console.log('⏱️  Auto photo timer set (5s fallback)...\n');
+    state.autoPhotoTimer = setTimeout(() => {
+      if (!state.cycleInProgress && !state.awaitingDetection) {
+        console.log('📸 AUTO PHOTO (timer fallback)!\n');
+        state.awaitingDetection = true;
+        executeCommand('takePhoto');
+      }
+    }, CONFIG.timing.autoPhotoDelay);
   }
 }
 
