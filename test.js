@@ -393,6 +393,13 @@ async function startSession(isMember, sessionData) {
 }
 
 async function resetSystemForNextUser() {
+  // 🔒 CRITICAL: Don't reset during active cycle
+  if (state.cycleInProgress) {
+    console.log('⚠️ Cannot reset - cycle in progress! Will retry in 2 seconds...\n');
+    setTimeout(() => resetSystemForNextUser(), 2000);
+    return;
+  }
+  
   console.log('\n========================================');
   console.log('🔄 RESETTING SYSTEM FOR NEXT USER');
   console.log('========================================\n');
@@ -404,17 +411,15 @@ async function resetSystemForNextUser() {
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate closed\n');
     
-    // Stop all motors
+    // Stop all motors IMMEDIATELY - no movement!
     console.log('🛑 Stopping all motors...');
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     console.log('✅ Motors stopped\n');
     
-    // Reset stepper to home
-    console.log('🏠 Resetting stepper to home...');
-    await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
-    await delay(CONFIG.timing.stepperReset);
-    console.log('✅ Stepper reset\n');
+    // ⚠️ DON'T reset stepper here - it causes unwanted rotation
+    // Stepper will be reset at START of next session instead
+    console.log('🏠 Stepper will reset at next session start\n');
     
   } catch (error) {
     console.error('❌ Reset error:', error.message);
@@ -468,11 +473,24 @@ async function executeAutoCycle() {
 
   state.itemsProcessed++;
   
+  // 🔒 Save cycle data BEFORE any operations (protect from external resets)
+  const cycleData = {
+    deviceId: CONFIG.device.id,
+    material: state.aiResult.materialType,
+    weight: state.weight.weight,
+    userId: state.currentUserId || null,
+    sessionId: state.sessionId || null,
+    sessionCode: state.sessionCode || null,
+    isGuest: state.isGuestSession,
+    itemNumber: state.itemsProcessed,
+    timestamp: new Date().toISOString()
+  };
+  
   console.log('\n========================================');
   console.log(`🤖 AUTO CYCLE START - ITEM #${state.itemsProcessed}`);
   console.log('========================================');
-  console.log(`📦 Material: ${state.aiResult.materialType}`);
-  console.log(`⚖️  Weight: ${state.weight.weight}g`);
+  console.log(`📦 Material: ${cycleData.material}`);
+  console.log(`⚖️  Weight: ${cycleData.weight}g`);
   console.log('========================================\n');
 
   try {
@@ -485,7 +503,7 @@ async function executeAutoCycle() {
 
     // 2. Rotate stepper to position
     console.log('🎯 Step 2: Stepper Rotation');
-    const targetPosition = state.aiResult.materialType === 'METAL_CAN' 
+    const targetPosition = cycleData.material === 'METAL_CAN' 
       ? CONFIG.motors.stepper.positions.metalCan
       : CONFIG.motors.stepper.positions.plasticBottle;
     
@@ -513,20 +531,8 @@ async function executeAutoCycle() {
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     console.log('✅ Step 5 complete\n');
 
-    // 6. Publish cycle complete to backend
+    // 6. Publish cycle complete to backend (using saved data)
     console.log('📤 Publishing cycle complete...');
-    const cycleData = {
-      deviceId: CONFIG.device.id,
-      material: state.aiResult.materialType,
-      weight: state.weight.weight,
-      userId: state.currentUserId || null,
-      sessionId: state.sessionId || null,
-      sessionCode: state.sessionCode || null,
-      isGuest: state.isGuestSession,
-      itemNumber: state.itemsProcessed,
-      timestamp: new Date().toISOString()
-    };
-    
     mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(cycleData));
     console.log('✅ Cycle complete published\n');
 
@@ -838,6 +844,9 @@ mqttClient.on('message', async (topic, message) => {
       
       if (payload.action === 'endSession') {
         console.log('🏁 SESSION END COMMAND');
+        if (state.cycleInProgress) {
+          console.log('⚠️ Session end requested during active cycle - will wait for completion\n');
+        }
         await resetSystemForNextUser();
         return;
       }
