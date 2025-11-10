@@ -1,4 +1,4 @@
-// agent.js - Updated for Member & Guest Support with Multiple Items
+// agent.js - Fixed QR Scanning After Guest Session
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 // ============================================
 const CONFIG = {
   device: {
-    id: 'RVM-3101'  // Can be read from config file or environment variable
+    id: 'RVM-3101'
   },
   
   backend: {
@@ -35,9 +35,9 @@ const CONFIG = {
       aiResult: 'rvm/RVM-3101/ai/result',
       weightResult: 'rvm/RVM-3101/weight/result',
       status: 'rvm/RVM-3101/status',
-      qrScan: 'rvm/RVM-3101/qr/scanned',        // Member QR validated
-      guestStart: 'rvm/RVM-3101/guest/start',   // Guest session started
-      screenState: 'rvm/RVM-3101/screen/state'  // Monitor screen updates
+      qrScan: 'rvm/RVM-3101/qr/scanned',
+      guestStart: 'rvm/RVM-3101/guest/start',
+      screenState: 'rvm/RVM-3101/screen/state'
     }
   },
   
@@ -62,10 +62,10 @@ const CONFIG = {
     METAL_CAN: 0.22,
     PLASTIC_BOTTLE: 0.30,
     GLASS: 0.25,
-    retryDelay: 2000,        // 2 seconds between retries
-    maxRetries: 3,           // Maximum retry attempts
-    hasObjectSensor: false,  // ⚠️ RVM-3101 does NOT have infrared body sensor (code 4 marked as NONE in docs)
-    minValidWeight: 5        // Minimum weight in grams to consider a real bottle (prevents empty machine cycles)
+    retryDelay: 2000,
+    maxRetries: 3,
+    hasObjectSensor: false,
+    minValidWeight: 5
   },
   
   timing: {
@@ -78,8 +78,8 @@ const CONFIG = {
     positionSettle: 500,
     gateOperation: 1000,
     autoPhotoDelay: 5000,
-    sessionTimeout: 120000,      // Session timeout: 2 minutes of inactivity
-    sessionMaxDuration: 600000   // Maximum session duration: 10 minutes total
+    sessionTimeout: 120000,
+    sessionMaxDuration: 600000
   },
   
   weight: {
@@ -98,21 +98,22 @@ const state = {
   cycleInProgress: false,
   calibrationAttempts: 0,
   ws: null,
+  isReady: false,         // 🔒 CRITICAL: System ready for new session
   
   // Session tracking
   sessionId: null,
   sessionCode: null,
   currentUserId: null,
   currentUserData: null,
-  isMember: false,        // Track if member or guest
-  isGuestSession: false,  // Track if guest session
+  isMember: false,
+  isGuestSession: false,
   
   // Multi-item tracking
   itemsProcessed: 0,
   sessionStartTime: null,
-  lastActivityTime: null,      // Track last bottle activity
-  sessionTimeoutTimer: null,   // Timer for inactivity timeout
-  maxDurationTimer: null,      // Timer for max session duration
+  lastActivityTime: null,
+  sessionTimeoutTimer: null,
+  maxDurationTimer: null,
   
   autoPhotoTimer: null,
   
@@ -135,23 +136,18 @@ function determineMaterialType(aiData) {
   let threshold = 1.0;
   let hasStrongKeyword = false;
   
-  // Check for metal can indicators
   if (className.includes('易拉罐') || className.includes('metal') || 
       className.includes('can') || className.includes('铝')) {
     materialType = 'METAL_CAN';
     threshold = CONFIG.detection.METAL_CAN;
-    // Strong keyword match if contains specific metal can terms
     hasStrongKeyword = className.includes('易拉罐') || className.includes('铝');
   } 
-  // Check for plastic bottle indicators
   else if (className.includes('pet') || className.includes('plastic') || 
            className.includes('瓶') || className.includes('bottle')) {
     materialType = 'PLASTIC_BOTTLE';
     threshold = CONFIG.detection.PLASTIC_BOTTLE;
-    // Strong keyword match if contains PET (common in barcodes/labels)
     hasStrongKeyword = className.includes('pet');
   } 
-  // Check for glass indicators
   else if (className.includes('玻璃') || className.includes('glass')) {
     materialType = 'GLASS';
     threshold = CONFIG.detection.GLASS;
@@ -161,10 +157,8 @@ function determineMaterialType(aiData) {
   const confidencePercent = Math.round(probability * 100);
   const thresholdPercent = Math.round(threshold * 100);
   
-  // If material type detected but confidence too low
   if (materialType !== 'UNKNOWN' && probability < threshold) {
-    // Use relaxed threshold if we have strong keyword match
-    const relaxedThreshold = threshold * 0.3; // 30% of original threshold
+    const relaxedThreshold = threshold * 0.3;
     
     if (hasStrongKeyword && probability >= relaxedThreshold) {
       console.log(`✅ ${materialType} detected via keyword match (${confidencePercent}% confidence, relaxed threshold)`);
@@ -270,9 +264,6 @@ async function executeRejectionCycle() {
   console.log('========================================\n');
 
   try {
-    // Reject items are dropped early - reverse belt immediately
-    // Don't move forward to stepper for rejected items
-    
     console.log('🎯 Reversing belt to reject bin (item rejected before sorting)');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
@@ -283,7 +274,6 @@ async function executeRejectionCycle() {
     console.log('✅ REJECTION CYCLE COMPLETE');
     console.log('========================================\n');
 
-    // Publish rejection event
     const rejectionData = {
       deviceId: CONFIG.device.id,
       reason: 'LOW_CONFIDENCE',
@@ -300,7 +290,6 @@ async function executeRejectionCycle() {
     console.error('❌ Rejection cycle error:', error.message);
   }
 
-  // Reset detection state
   state.aiResult = null;
   state.weight = null;
   state.detectionRetries = 0;
@@ -312,17 +301,14 @@ async function executeRejectionCycle() {
   console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   - awaitingDetection: ${state.awaitingDetection}\n`);
 
-  // Ready for next item
   if (state.autoCycleEnabled) {
     console.log('🔄 Ready for next item...\n');
     
-    // Ensure gate is open for next item
     console.log('🚪 Ensuring gate is open for next item...');
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate confirmed open, ready for next bottle!\n');
     
-    // Restart timer for next bottle (no object sensor available)
     if (state.autoPhotoTimer) {
       clearTimeout(state.autoPhotoTimer);
     }
@@ -350,7 +336,6 @@ async function handleSessionTimeout(reason) {
   console.log(`Session duration: ${Math.round((Date.now() - state.sessionStartTime) / 1000)}s`);
   console.log('========================================\n');
   
-  // Publish timeout event to backend
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
     status: 'timeout',
@@ -364,30 +349,24 @@ async function handleSessionTimeout(reason) {
     timestamp: new Date().toISOString()
   }));
   
-  // Reset system
   await resetSystemForNextUser();
 }
 
 function resetInactivityTimer() {
-  // Clear existing inactivity timer
   if (state.sessionTimeoutTimer) {
     clearTimeout(state.sessionTimeoutTimer);
   }
   
-  // Update last activity time
   state.lastActivityTime = Date.now();
   
-  // Set new inactivity timer (2 minutes)
   state.sessionTimeoutTimer = setTimeout(() => {
     handleSessionTimeout('inactivity');
   }, CONFIG.timing.sessionTimeout);
 }
 
 function startSessionTimers() {
-  // Reset inactivity timer (will be reset on each bottle)
   resetInactivityTimer();
   
-  // Set maximum duration timer (10 minutes total)
   if (state.maxDurationTimer) {
     clearTimeout(state.maxDurationTimer);
   }
@@ -417,6 +396,9 @@ async function startSession(isMember, sessionData) {
   console.log(`🎬 STARTING ${isMember ? 'MEMBER' : 'GUEST'} SESSION`);
   console.log('========================================');
   
+  // 🔒 Mark system as not ready during session start
+  state.isReady = false;
+  
   if (isMember) {
     console.log(`👤 User: ${sessionData.userName || sessionData.userId}`);
     console.log(`🔑 Session Code: ${sessionData.sessionCode}`);
@@ -428,6 +410,7 @@ async function startSession(isMember, sessionData) {
     };
     state.isMember = true;
     state.isGuestSession = false;
+    state.sessionCode = sessionData.sessionCode;
   } else {
     console.log(`🎫 Guest Session: ${sessionData.sessionCode}`);
     console.log(`📝 Session ID: ${sessionData.sessionId}`);
@@ -440,7 +423,6 @@ async function startSession(isMember, sessionData) {
   
   console.log('========================================\n');
   
-  // Enable auto cycle
   state.autoCycleEnabled = true;
   state.itemsProcessed = 0;
   state.sessionStartTime = new Date();
@@ -448,13 +430,11 @@ async function startSession(isMember, sessionData) {
   state.detectionRetries = 0;
   state.awaitingDetection = false;
   
-  // Start session timeout monitoring
   console.log(`⏱️  Session timeouts:`);
   console.log(`   - Inactivity timeout: ${CONFIG.timing.sessionTimeout / 1000}s (resets on each bottle)`);
   console.log(`   - Maximum duration: ${CONFIG.timing.sessionMaxDuration / 1000}s (absolute limit)\n`);
   startSessionTimers();
   
-  // Reset system
   console.log('🔧 Resetting system...');
   await executeCommand('customMotor', CONFIG.motors.belt.stop);
   await executeCommand('customMotor', CONFIG.motors.compactor.stop);
@@ -462,20 +442,16 @@ async function startSession(isMember, sessionData) {
   await delay(2000);
   console.log('✅ Reset complete\n');
   
-  // ⚖️ Zero the weight sensor (critical to prevent false readings)
   console.log('⚖️ Calibrating weight sensor (ensure machine is empty)...');
   await executeCommand('calibrateWeight');
   await delay(1500);
   console.log('✅ Weight sensor zeroed\n');
   
-  // Open gate
   console.log('🚪 Opening gate...');
   await executeCommand('openGate');
   await delay(CONFIG.timing.gateOperation);
   console.log('✅ Gate opened!\n');
   
-  // ⚠️ No object sensor available (marked as NONE in RVM-3101 docs)
-  // Use timer but will validate weight before processing
   console.log('⏱️  Auto photo timer: 5 seconds...');
   console.log('💡 System will validate weight before processing\n');
   
@@ -488,6 +464,18 @@ async function startSession(isMember, sessionData) {
     state.awaitingDetection = true;
     executeCommand('takePhoto');
   }, CONFIG.timing.autoPhotoDelay);
+  
+  // 📤 Publish session started event
+  mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+    deviceId: CONFIG.device.id,
+    status: 'session_active',
+    event: 'session_started',
+    sessionType: isMember ? 'member' : 'guest',
+    userId: state.currentUserId,
+    sessionId: state.sessionId,
+    sessionCode: state.sessionCode,
+    timestamp: new Date().toISOString()
+  }));
 }
 
 async function resetSystemForNextUser() {
@@ -498,6 +486,7 @@ async function resetSystemForNextUser() {
   console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
   console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   - awaitingDetection: ${state.awaitingDetection}`);
+  console.log(`   - isReady: ${state.isReady}`);
   console.log('========================================\n');
   
   // 🔒 CRITICAL: Don't reset during active cycle
@@ -512,6 +501,7 @@ async function resetSystemForNextUser() {
   state.autoCycleEnabled = false;
   state.awaitingDetection = false;
   state.detectionRetries = 0;
+  state.isReady = false;  // 🔒 Mark as not ready
   
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
@@ -526,14 +516,12 @@ async function resetSystemForNextUser() {
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate closed\n');
     
-    // Stop all motors IMMEDIATELY - no movement!
+    // Stop all motors
     console.log('🛑 Stopping all motors...');
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     console.log('✅ Motors stopped\n');
     
-    // ⚠️ DON'T reset stepper here - it causes unwanted rotation
-    // Stepper will be reset at START of next session instead
     console.log('🏠 Stepper will reset at next session start\n');
     
   } catch (error) {
@@ -558,13 +546,15 @@ async function resetSystemForNextUser() {
   state.detectionRetries = 0;
   state.awaitingDetection = false;
   
-  // Clear all timers
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
     state.autoPhotoTimer = null;
   }
   
   clearSessionTimers();
+  
+  // 🔓 Mark system as ready BEFORE publishing
+  state.isReady = true;
   
   console.log('========================================');
   console.log('✅ SYSTEM READY FOR NEXT USER');
@@ -573,17 +563,21 @@ async function resetSystemForNextUser() {
   console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
   console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   - awaitingDetection: ${state.awaitingDetection}`);
-  console.log(`   - autoPhotoTimer: ${state.autoPhotoTimer ? 'ACTIVE' : 'null'}`);
+  console.log(`   - isReady: ${state.isReady}`);
+  console.log(`   - moduleId: ${state.moduleId ? 'SET' : 'NULL'}`);
   console.log('========================================\n');
   
-  // ✅ Notify backend that reset is complete
+  // ✅ Notify backend that reset is complete and ready for new session
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
     status: 'ready',
     event: 'reset_complete',
+    isReady: true,
     timestamp: new Date().toISOString()
-  }));
+  }), { retain: false });  // Don't retain this message
+  
   console.log('📤 Reset complete notification sent to backend\n');
+  console.log('🟢 SYSTEM IS NOW READY FOR QR SCAN OR GUEST SESSION\n');
 }
 
 // ============================================
@@ -598,7 +592,6 @@ async function executeAutoCycle() {
 
   state.itemsProcessed++;
   
-  // 🔒 Save cycle data BEFORE any operations (protect from external resets)
   const cycleData = {
     deviceId: CONFIG.device.id,
     material: state.aiResult.materialType,
@@ -619,14 +612,12 @@ async function executeAutoCycle() {
   console.log('========================================\n');
 
   try {
-    // 1. Move belt to stepper
     console.log('🎯 Step 1: Belt → Stepper');
     await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     console.log('✅ Step 1 complete\n');
 
-    // 2. Rotate stepper to position
     console.log('🎯 Step 2: Stepper Rotation');
     const targetPosition = cycleData.material === 'METAL_CAN' 
       ? CONFIG.motors.stepper.positions.metalCan
@@ -636,27 +627,23 @@ async function executeAutoCycle() {
     await delay(CONFIG.timing.stepperRotate);
     console.log('✅ Step 2 complete\n');
 
-    // 3. Reverse belt
     console.log('🎯 Step 3: Reverse Belt');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     console.log('✅ Step 3 complete\n');
 
-    // 4. Reset stepper
     console.log('🎯 Step 4: Reset Stepper');
     await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await delay(CONFIG.timing.stepperReset);
     console.log('✅ Step 4 complete\n');
 
-    // 5. Compactor
     console.log('🎯 Step 5: Compactor');
     await executeCommand('customMotor', CONFIG.motors.compactor.start);
     await delay(CONFIG.timing.compactor);
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     console.log('✅ Step 5 complete\n');
 
-    // 6. Publish cycle complete to backend (using saved data)
     console.log('📤 Publishing cycle complete...');
     mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(cycleData));
     console.log('✅ Cycle complete published\n');
@@ -665,14 +652,12 @@ async function executeAutoCycle() {
     console.log(`✅ AUTO CYCLE COMPLETE - ITEM #${state.itemsProcessed}`);
     console.log('========================================\n');
     
-    // Reset inactivity timer (user is still active)
     resetInactivityTimer();
 
   } catch (error) {
     console.error('❌ Auto cycle error:', error.message);
   }
 
-  // Reset for next bottle
   state.aiResult = null;
   state.weight = null;
   state.calibrationAttempts = 0;
@@ -685,18 +670,15 @@ async function executeAutoCycle() {
   console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   - awaitingDetection: ${state.awaitingDetection}\n`);
 
-  // ✅ Keep session active for next item
   if (state.autoCycleEnabled) {
     console.log('🔄 Ready for next item (session still active)...\n');
     console.log(`📊 Session stats: ${state.itemsProcessed} items processed\n`);
     
-    // Ensure gate is open for next item
     console.log('🚪 Ensuring gate is open for next item...');
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
     console.log('✅ Gate confirmed open, ready for next bottle!\n');
     
-    // Restart timer for next bottle (no object sensor available)
     if (state.autoPhotoTimer) {
       clearTimeout(state.autoPhotoTimer);
     }
@@ -728,14 +710,12 @@ function connectWebSocket() {
     try {
       const message = JSON.parse(data.toString());
       
-      // Module ID
       if (message.function === '01') {
         state.moduleId = message.moduleId;
         console.log(`📟 Module ID: ${state.moduleId}\n`);
         return;
       }
       
-      // AI Result
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const materialType = determineMaterialType(aiData);
@@ -752,28 +732,23 @@ function connectWebSocket() {
         
         mqttClient.publish(CONFIG.mqtt.topics.aiResult, JSON.stringify(state.aiResult));
         
-        // Handle detection result
         if (state.autoCycleEnabled && state.awaitingDetection) {
           if (state.aiResult.materialType !== 'UNKNOWN') {
-            // Success! Proceed to weight
             console.log('✅ Material identified, proceeding to weight...\n');
             state.detectionRetries = 0;
             state.awaitingDetection = false;
             setTimeout(() => executeCommand('getWeight'), 500);
           } else {
-            // Unknown material
             state.detectionRetries++;
             console.log(`⚠️ UNKNOWN material (Attempt ${state.detectionRetries}/${CONFIG.detection.maxRetries})\n`);
             
             if (state.detectionRetries < CONFIG.detection.maxRetries) {
-              // Retry photo capture
               console.log(`🔄 Retrying photo in ${CONFIG.detection.retryDelay/1000} seconds...\n`);
               setTimeout(() => {
                 console.log('📸 RETRY PHOTO!\n');
                 executeCommand('takePhoto');
               }, CONFIG.detection.retryDelay);
             } else {
-              // Max retries reached, reject item
               console.log('❌ Max retries reached, rejecting item...\n');
               state.awaitingDetection = false;
               state.cycleInProgress = true;
@@ -784,7 +759,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Weight Result
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
@@ -799,7 +773,6 @@ function connectWebSocket() {
         
         console.log(`⚖️ Weight: ${state.weight.weight}g (raw: ${state.weight.rawWeight})`);
         
-        // 🚨 CRITICAL: Detect suspiciously high weight (empty machine with bad sensor)
         if (state.weight.weight > 500 && state.calibrationAttempts === 0) {
           console.log(`⚠️ WARNING: Suspiciously high weight detected (${state.weight.weight}g)`);
           console.log(`⚠️ This may indicate scale needs zeroing/calibration\n`);
@@ -819,9 +792,7 @@ function connectWebSocket() {
         
         if (state.weight.weight > 0) state.calibrationAttempts = 0;
         
-        // 🚨 CRITICAL: Validate weight before proceeding (prevent empty machine cycles)
         if (state.autoCycleEnabled && state.aiResult && !state.cycleInProgress) {
-          // Check minimum valid weight
           if (state.weight.weight < CONFIG.detection.minValidWeight) {
             console.log(`\n⚠️ ========================================`);
             console.log(`⚠️ WEIGHT TOO LOW: ${state.weight.weight}g`);
@@ -830,13 +801,11 @@ function connectWebSocket() {
             console.log(`⚠️ Skipping cycle - waiting for real bottle`);
             console.log(`⚠️ ========================================\n`);
             
-            // Reset detection state
             state.aiResult = null;
             state.weight = null;
             state.awaitingDetection = false;
             state.detectionRetries = 0;
             
-            // Set timer for next attempt
             if (state.autoPhotoTimer) {
               clearTimeout(state.autoPhotoTimer);
             }
@@ -852,28 +821,21 @@ function connectWebSocket() {
             return;
           }
           
-          // Weight is valid, proceed with cycle
           state.cycleInProgress = true;
           setTimeout(() => executeAutoCycle(), 1000);
         }
         return;
       }
       
-      // Device Status (RVM-3101 doesn't have object sensor - code 4 marked as NONE)
-      // Keeping this for compatibility but it likely won't trigger
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
-        
-        // Log all deviceStatus codes for debugging
         console.log(`📊 Device Status Code: ${code}`);
         
-        // Check for bin full status (codes 0-3)
         if (code >= 0 && code <= 3) {
           const binNames = ['Left (PET)', 'Middle (Metal)', 'Right', 'Glass'];
           console.log(`⚠️ Bin Full Alert: ${binNames[code]} bin is full!\n`);
         }
         
-        // Object detection (code 4 - marked as NONE in docs, likely won't occur)
         if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress && !state.awaitingDetection) {
           console.log('\n========================================');
           console.log('👁️  OBJECT DETECTED BY SENSOR (UNEXPECTED!)');
@@ -918,24 +880,20 @@ const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
 mqttClient.on('connect', () => {
   console.log('✅ MQTT connected');
   
-  // Subscribe to topics
   mqttClient.subscribe(CONFIG.mqtt.topics.commands);
   mqttClient.subscribe(CONFIG.mqtt.topics.autoControl);
-  mqttClient.subscribe(CONFIG.mqtt.topics.qrScan);       // Member QR validated
-  mqttClient.subscribe(CONFIG.mqtt.topics.guestStart);   // Guest session started
-  mqttClient.subscribe(CONFIG.mqtt.topics.screenState);  // Monitor screen updates
+  mqttClient.subscribe(CONFIG.mqtt.topics.qrScan);
+  mqttClient.subscribe(CONFIG.mqtt.topics.guestStart);
+  mqttClient.subscribe(CONFIG.mqtt.topics.screenState);
   
-  // Publish online status
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
     status: 'online',
     timestamp: new Date().toISOString()
   }), { retain: true });
   
-  // Connect WebSocket
   connectWebSocket();
   
-  // Request module ID
   setTimeout(() => {
     requestModuleId();
   }, 2000);
@@ -955,28 +913,60 @@ mqttClient.on('message', async (topic, message) => {
       console.log(`👤 User: ${payload.userName || payload.userId}`);
       console.log(`🔑 Session Code: ${payload.sessionCode}`);
       console.log(`📊 Current State:`);
+      console.log(`   - isReady: ${state.isReady}`);
       console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
       console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
       console.log(`   - awaitingDetection: ${state.awaitingDetection}`);
+      console.log(`   - moduleId: ${state.moduleId ? 'SET' : 'NULL'}`);
       console.log('========================================\n');
+      
+      // 🔒 CRITICAL: Validate system is ready
+      if (!state.isReady) {
+        console.log('❌ SYSTEM NOT READY - Rejecting QR scan');
+        console.log('⚠️ System must complete reset before accepting new session\n');
+        
+        // Notify backend that device is not ready
+        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+          deviceId: CONFIG.device.id,
+          status: 'busy',
+          event: 'qr_rejected',
+          reason: 'system_not_ready',
+          timestamp: new Date().toISOString()
+        }));
+        return;
+      }
+      
+      // Validate module ID
+      if (!state.moduleId) {
+        console.log('❌ MODULE ID NOT SET - Cannot start session');
+        console.log('🔄 Requesting module ID...\n');
+        await requestModuleId();
+        await delay(1000);
+        
+        if (!state.moduleId) {
+          console.log('❌ Failed to get module ID - rejecting QR scan\n');
+          return;
+        }
+      }
       
       // Prevent duplicate sessions
       if (state.cycleInProgress) {
-        console.log('⚠️ Cycle in progress, ignoring QR scan');
+        console.log('⚠️ Cycle in progress, ignoring QR scan\n');
         return;
       }
       
       if (state.autoCycleEnabled) {
-        console.log('⚠️ System already active, ignoring QR scan');
-        console.log('⚠️ This should not happen! Forcing reset...\n');
-        // Force reset if system thinks it's active but no cycle running
+        console.log('⚠️ System already active, forcing cleanup...\n');
         state.autoCycleEnabled = false;
         state.awaitingDetection = false;
         if (state.autoPhotoTimer) {
           clearTimeout(state.autoPhotoTimer);
           state.autoPhotoTimer = null;
         }
+        await delay(500);
       }
+      
+      console.log('✅ All validations passed - starting member session\n');
       
       // Start member session
       await startSession(true, payload);
@@ -987,16 +977,32 @@ mqttClient.on('message', async (topic, message) => {
     // GUEST SESSION START
     // ============================================
     if (topic === CONFIG.mqtt.topics.guestStart) {
-      // Prevent duplicate sessions
+      console.log('\n========================================');
+      console.log('🎫 GUEST SESSION START RECEIVED');
+      console.log('========================================');
+      console.log(`📊 Current State:`);
+      console.log(`   - isReady: ${state.isReady}`);
+      console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
+      console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
+      console.log('========================================\n');
+      
+      // 🔒 Validate system is ready
+      if (!state.isReady) {
+        console.log('❌ SYSTEM NOT READY - Rejecting guest start\n');
+        return;
+      }
+      
       if (state.cycleInProgress) {
-        console.log('⚠️ Cycle in progress, ignoring guest start');
+        console.log('⚠️ Cycle in progress, ignoring guest start\n');
         return;
       }
       
       if (state.autoCycleEnabled) {
-        console.log('⚠️ System already active, ignoring guest start');
+        console.log('⚠️ System already active, ignoring guest start\n');
         return;
       }
+      
+      console.log('✅ All validations passed - starting guest session\n');
       
       // Start guest session
       await startSession(false, payload);
@@ -1008,7 +1014,6 @@ mqttClient.on('message', async (topic, message) => {
     // ============================================
     if (topic === CONFIG.mqtt.topics.screenState) {
       console.log(`📺 Screen update: ${payload.state}`);
-      // Agent can log or react to screen state changes
       return;
     }
     
@@ -1042,6 +1047,7 @@ mqttClient.on('message', async (topic, message) => {
         state.cycleInProgress = false;
         state.awaitingDetection = false;
         state.detectionRetries = 0;
+        state.isReady = false;
         if (state.autoPhotoTimer) {
           clearTimeout(state.autoPhotoTimer);
           state.autoPhotoTimer = null;
@@ -1052,7 +1058,6 @@ mqttClient.on('message', async (topic, message) => {
       if (payload.action === 'forceReset') {
         console.log('🚨 FORCE RESET - Emergency state cleanup');
         console.log('⚠️ Overriding cycle protection...\n');
-        // Temporarily disable cycle protection
         const wasCycleInProgress = state.cycleInProgress;
         state.cycleInProgress = false;
         await resetSystemForNextUser();
@@ -1130,6 +1135,7 @@ async function requestModuleId() {
       timeout: 5000,
       headers: { 'Content-Type': 'application/json' }
     });
+    console.log('📟 Module ID requested');
   } catch (error) {
     console.error('❌ Module ID request failed:', error.message);
   }
@@ -1157,7 +1163,7 @@ process.on('SIGTERM', gracefulShutdown);
 // STARTUP
 // ============================================
 console.log('========================================');
-console.log('🚀 RVM AGENT - MULTI-ITEM SUPPORT');
+console.log('🚀 RVM AGENT - MULTI-ITEM SUPPORT [FIXED QR]');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log(`🔐 Backend: ${CONFIG.backend.url}`);
@@ -1168,5 +1174,14 @@ console.log('✅ Reject: Auto-reject unrecognized items');
 console.log('✅ Weight validation: Min 5g to prevent false cycles');
 console.log('⏱️  Inactivity timeout: 2 minutes');
 console.log('⏱️  Max session duration: 10 minutes');
+console.log('🔒 Ready state validation for QR scans');
 console.log('========================================');
 console.log('⏳ Starting...\n');
+
+// Mark as ready after module ID is received
+setTimeout(() => {
+  if (state.moduleId) {
+    state.isReady = true;
+    console.log('🟢 SYSTEM MARKED AS READY (Module ID received)\n');
+  }
+}, 3000);
