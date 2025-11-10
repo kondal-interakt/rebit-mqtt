@@ -408,7 +408,7 @@
 
         // Refocus on click (but only if not processing)
         document.addEventListener('click', (e) => {
-            if (e.target !== elements.scanInput && !state.isProcessing) {
+            if (e.target !== elements.scanInput ) {
                 elements.scanInput.focus();
             }
         });
