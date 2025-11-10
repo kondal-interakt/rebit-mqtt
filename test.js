@@ -1074,6 +1074,27 @@ mqttClient.on('message', async (topic, message) => {
         return;
       }
       
+      if (payload.action === 'getStatus') {
+        console.log('📊 STATUS REQUEST - Publishing current state');
+        
+        // Publish current device status
+        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+          deviceId: CONFIG.device.id,
+          status: state.isReady ? 'ready' : 'busy',
+          event: 'status_response',
+          isReady: state.isReady,
+          cycleInProgress: state.cycleInProgress,
+          autoCycleEnabled: state.autoCycleEnabled,
+          hasActiveSession: state.autoCycleEnabled,
+          sessionType: state.isMember ? 'member' : (state.isGuestSession ? 'guest' : null),
+          itemsProcessed: state.itemsProcessed,
+          timestamp: new Date().toISOString()
+        }));
+        
+        console.log(`✅ Status published: ${state.isReady ? 'ready' : 'busy'}\n`);
+        return;
+      }
+      
       if (payload.action === 'takePhoto' && state.moduleId) {
         console.log('📸 MANUAL PHOTO!\n');
         if (state.autoPhotoTimer) {
@@ -1183,5 +1204,16 @@ setTimeout(() => {
   if (state.moduleId) {
     state.isReady = true;
     console.log('🟢 SYSTEM MARKED AS READY (Module ID received)\n');
+    
+    // 📤 Publish ready status to backend
+    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+      deviceId: CONFIG.device.id,
+      status: 'ready',
+      event: 'startup_ready',
+      isReady: true,
+      timestamp: new Date().toISOString()
+    }));
+    
+    console.log('📤 Initial ready status published to backend\n');
   }
 }, 3000);
