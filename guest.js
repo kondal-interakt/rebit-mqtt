@@ -1,4 +1,4 @@
-// agent.js - Improved Multi-Item Flow (Parallel Compactor)
+// agent.js - Fixed Multi-Item Flow (Proper Session Reset)
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -124,7 +124,10 @@ const state = {
   // Detection retry tracking
   detectionRetries: 0,
   maxDetectionRetries: 3,
-  awaitingDetection: false
+  awaitingDetection: false,
+  
+  // 🆕 Reset tracking
+  resetting: false
 };
 
 // ============================================
@@ -372,7 +375,7 @@ async function executeRejectionCycle() {
 }
 
 // ============================================
-// SESSION TIMEOUT HANDLING
+// SESSION TIMEOUT HANDLING - 🔧 FIXED
 // ============================================
 async function handleSessionTimeout(reason) {
   console.log('\n========================================');
@@ -381,7 +384,21 @@ async function handleSessionTimeout(reason) {
   console.log(`Reason: ${reason}`);
   console.log(`Items processed: ${state.itemsProcessed}`);
   console.log(`Session duration: ${Math.round((Date.now() - state.sessionStartTime) / 1000)}s`);
+  console.log(`📊 Current State Before Timeout Reset:`);
+  console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
+  console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
+  console.log(`   - compactorRunning: ${state.compactorRunning}`);
+  console.log(`   - isReady: ${state.isReady}`);
+  console.log(`   - resetting: ${state.resetting}`);
   console.log('========================================\n');
+  
+  // 🔧 FIX 1: Stop accepting new items immediately
+  state.autoCycleEnabled = false;
+  state.awaitingDetection = false;
+  if (state.autoPhotoTimer) {
+    clearTimeout(state.autoPhotoTimer);
+    state.autoPhotoTimer = null;
+  }
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
@@ -396,8 +413,30 @@ async function handleSessionTimeout(reason) {
     timestamp: new Date().toISOString()
   }));
   
+  // 🔧 FIX 2: Wait for current cycle to complete if in progress
+  if (state.cycleInProgress) {
+    console.log('⏳ Waiting for current cycle to complete before timeout reset...');
+    const maxWait = 60000; // 60 seconds max wait
+    const startWait = Date.now();
+    
+    while (state.cycleInProgress && (Date.now() - startWait) < maxWait) {
+      await delay(1000);
+      console.log(`   ⏱️  Waiting for cycle... ${Math.ceil((maxWait - (Date.now() - startWait)) / 1000)}s remaining`);
+    }
+    
+    if (state.cycleInProgress) {
+      console.log('⚠️ Cycle still in progress after timeout - forcing completion');
+      state.cycleInProgress = false;
+    } else {
+      console.log('✅ Cycle completed, proceeding with reset');
+    }
+  }
+  
   // Normal timeout - wait for compactor to complete last bottle
   await resetSystemForNextUser(false);
+  
+  console.log('✅ Session timeout reset complete - system should be ready now\n');
+  console.log(`📊 Final State After Timeout: isReady = ${state.isReady}\n`);
 }
 
 function resetInactivityTimer() {
@@ -535,6 +574,7 @@ async function startSession(isMember, sessionData) {
   }));
 }
 
+// 🔧 FIXED: Improved reset with better state tracking and retry logic
 async function resetSystemForNextUser(forceStop = false) {
   console.log('\n========================================');
   console.log('🔄 RESETTING SYSTEM FOR NEXT USER');
@@ -544,20 +584,44 @@ async function resetSystemForNextUser(forceStop = false) {
   console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   - compactorRunning: ${state.compactorRunning}`);
   console.log(`   - isReady: ${state.isReady}`);
+  console.log(`   - resetting: ${state.resetting}`);
   console.log(`   - forceStop: ${forceStop}`);
   console.log('========================================\n');
   
-  if (state.cycleInProgress) {
-    console.log('⚠️ Cannot reset - cycle in progress! Will retry in 2 seconds...\n');
-    setTimeout(() => resetSystemForNextUser(forceStop), 2000);
+  // 🔧 FIX 3: Prevent multiple concurrent resets
+  if (state.resetting) {
+    console.log('⚠️ Reset already in progress, skipping duplicate reset request\n');
     return;
+  }
+  
+  state.resetting = true;
+  
+  // 🔧 FIX 4: Wait for cycle completion with better retry logic
+  if (state.cycleInProgress) {
+    console.log('⏳ Cycle in progress - waiting for completion before reset...');
+    const maxWait = 60000; // 60 seconds
+    const startWait = Date.now();
+    let attempts = 0;
+    
+    while (state.cycleInProgress && (Date.now() - startWait) < maxWait) {
+      await delay(2000);
+      attempts++;
+      const remainingTime = Math.ceil((maxWait - (Date.now() - startWait)) / 1000);
+      console.log(`   ⏱️  Attempt ${attempts}: Waiting for cycle... ${remainingTime}s remaining`);
+    }
+    
+    if (state.cycleInProgress) {
+      console.log('⚠️ Cycle still in progress after max wait - forcing completion');
+      state.cycleInProgress = false;
+    } else {
+      console.log('✅ Cycle completed naturally\n');
+    }
   }
   
   console.log('🛑 Force stopping all operations...');
   state.autoCycleEnabled = false;
   state.awaitingDetection = false;
   state.detectionRetries = 0;
-  state.isReady = false;
   
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
@@ -619,6 +683,7 @@ async function resetSystemForNextUser(forceStop = false) {
     console.error('❌ Reset error:', error.message);
   }
   
+  // Clear all state
   state.aiResult = null;
   state.weight = null;
   state.currentUserId = null;
@@ -643,6 +708,8 @@ async function resetSystemForNextUser(forceStop = false) {
   
   clearSessionTimers();
   
+  // 🔧 FIX 5: Always set isReady and resetting flags at the end
+  state.resetting = false;
   state.isReady = true;
   
   console.log('========================================');
@@ -653,6 +720,7 @@ async function resetSystemForNextUser(forceStop = false) {
   console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   - compactorRunning: ${state.compactorRunning}`);
   console.log(`   - isReady: ${state.isReady}`);
+  console.log(`   - resetting: ${state.resetting}`);
   console.log('========================================\n');
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
@@ -954,7 +1022,7 @@ function connectWebSocket() {
 }
 
 // ============================================
-// MQTT CONNECTION
+// MQTT CONNECTION - 🔧 IMPROVED QR HANDLING
 // ============================================
 const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
   username: CONFIG.mqtt.username,
@@ -989,6 +1057,7 @@ mqttClient.on('message', async (topic, message) => {
   try {
     const payload = JSON.parse(message.toString());
     
+    // 🔧 FIX 6: Enhanced QR scan handler with better diagnostics
     if (topic === CONFIG.mqtt.topics.qrScan) {
       console.log('\n========================================');
       console.log('📱 QR SCAN RECEIVED');
@@ -997,17 +1066,40 @@ mqttClient.on('message', async (topic, message) => {
       console.log(`🔑 Session Code: ${payload.sessionCode}`);
       console.log(`📊 Current State:`);
       console.log(`   - isReady: ${state.isReady}`);
+      console.log(`   - resetting: ${state.resetting}`);
       console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
+      console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
       console.log(`   - compactorRunning: ${state.compactorRunning}`);
+      console.log(`   - moduleId: ${state.moduleId ? 'SET' : 'NOT SET'}`);
       console.log('========================================\n');
+      
+      // Check if system is resetting
+      if (state.resetting) {
+        console.log('❌ SYSTEM CURRENTLY RESETTING - Rejecting QR scan (try again in a moment)\n');
+        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+          deviceId: CONFIG.device.id,
+          status: 'busy',
+          event: 'qr_rejected',
+          reason: 'system_resetting',
+          message: 'System is currently resetting from previous session. Please try again in a moment.',
+          timestamp: new Date().toISOString()
+        }));
+        return;
+      }
       
       if (!state.isReady) {
         console.log('❌ SYSTEM NOT READY - Rejecting QR scan\n');
+        console.log('💡 Possible reasons:');
+        console.log('   - Previous session still cleaning up');
+        console.log('   - Compactor still running');
+        console.log('   - System initialization incomplete\n');
         mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
           deviceId: CONFIG.device.id,
           status: 'busy',
           event: 'qr_rejected',
           reason: 'system_not_ready',
+          cycleInProgress: state.cycleInProgress,
+          compactorRunning: state.compactorRunning,
           timestamp: new Date().toISOString()
         }));
         return;
@@ -1017,11 +1109,27 @@ mqttClient.on('message', async (topic, message) => {
         console.log('❌ MODULE ID NOT SET - Cannot start session\n');
         await requestModuleId();
         await delay(1000);
-        if (!state.moduleId) return;
+        if (!state.moduleId) {
+          mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+            deviceId: CONFIG.device.id,
+            status: 'error',
+            event: 'qr_rejected',
+            reason: 'module_id_missing',
+            timestamp: new Date().toISOString()
+          }));
+          return;
+        }
       }
       
       if (state.cycleInProgress) {
         console.log('⚠️ Cycle in progress, ignoring QR scan\n');
+        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+          deviceId: CONFIG.device.id,
+          status: 'busy',
+          event: 'qr_rejected',
+          reason: 'cycle_in_progress',
+          timestamp: new Date().toISOString()
+        }));
         return;
       }
       
@@ -1044,7 +1152,18 @@ mqttClient.on('message', async (topic, message) => {
     if (topic === CONFIG.mqtt.topics.guestStart) {
       console.log('\n========================================');
       console.log('🎫 GUEST SESSION START RECEIVED');
+      console.log('========================================');
+      console.log(`📊 Current State:`);
+      console.log(`   - isReady: ${state.isReady}`);
+      console.log(`   - resetting: ${state.resetting}`);
+      console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
+      console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
       console.log('========================================\n');
+      
+      if (state.resetting) {
+        console.log('❌ SYSTEM CURRENTLY RESETTING - Rejecting guest start\n');
+        return;
+      }
       
       if (!state.isReady || state.cycleInProgress || state.autoCycleEnabled) {
         console.log('❌ SYSTEM NOT READY - Rejecting guest start\n');
@@ -1093,6 +1212,7 @@ mqttClient.on('message', async (topic, message) => {
         
         state.autoCycleEnabled = false;
         state.cycleInProgress = false;
+        state.resetting = false;
         state.isReady = false;
         return;
       }
@@ -1100,6 +1220,7 @@ mqttClient.on('message', async (topic, message) => {
       if (payload.action === 'forceReset') {
         console.log('🚨 FORCE RESET - Emergency state cleanup\n');
         state.cycleInProgress = false;
+        state.resetting = false;
         // Force stop everything including compactor
         await resetSystemForNextUser(true);
         return;
@@ -1121,6 +1242,7 @@ mqttClient.on('message', async (topic, message) => {
           status: state.isReady ? 'ready' : 'busy',
           event: 'status_response',
           isReady: state.isReady,
+          resetting: state.resetting,
           cycleInProgress: state.cycleInProgress,
           compactorRunning: state.compactorRunning,
           itemsProcessed: state.itemsProcessed,
@@ -1185,9 +1307,10 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - OPTIMIZED MULTI-ITEM');
+console.log('🚀 RVM AGENT - FIXED MULTI-ITEM FLOW');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
+console.log('✅ Fixed: Guest→Member session transitions');
 console.log('✅ Parallel Compactor: Next bottle ready immediately!');
 console.log('✅ Member: QR → Multiple items');
 console.log('✅ Guest: No QR → Multiple items');
