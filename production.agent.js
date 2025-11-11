@@ -1,8 +1,12 @@
-// agent.js - Improved Multi-Item Flow (Parallel Compactor)
+// agent-production.js - Industry Standard RVM Agent
+// Includes: Health Monitoring, Error Codes, Watchdog, Data Persistence, Parallel Compactor
+
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
+const sqlite3 = require('sqlite3').verbose();
+const os = require('os');
 
 // ============================================
 // CONFIGURATION
@@ -37,7 +41,10 @@ const CONFIG = {
       status: 'rvm/RVM-3101/status',
       qrScan: 'rvm/RVM-3101/qr/scanned',
       guestStart: 'rvm/RVM-3101/guest/start',
-      screenState: 'rvm/RVM-3101/screen/state'
+      screenState: 'rvm/RVM-3101/screen/state',
+      health: 'rvm/RVM-3101/health',
+      errors: 'rvm/RVM-3101/errors',
+      watchdog: 'rvm/RVM-3101/watchdog'
     }
   },
   
@@ -64,7 +71,6 @@ const CONFIG = {
     GLASS: 0.25,
     retryDelay: 2000,
     maxRetries: 3,
-    hasObjectSensor: false,
     minValidWeight: 5
   },
   
@@ -75,7 +81,6 @@ const CONFIG = {
     stepperRotate: 4000,
     stepperReset: 6000,
     compactor: 24000,
-    positionSettle: 500,
     gateOperation: 1000,
     autoPhotoDelay: 5000,
     sessionTimeout: 120000,
@@ -84,7 +89,56 @@ const CONFIG = {
   
   weight: {
     coefficients: { 1: 988, 2: 942, 3: 942, 4: 942 }
+  },
+  
+  health: {
+    heartbeatInterval: 5000,
+    publishInterval: 30000
+  },
+  
+  watchdog: {
+    checkInterval: 30000,
+    activityTimeout: 120000,
+    criticalTimeout: 300000,
+    enabled: true
   }
+};
+
+// ============================================
+// ERROR CODES
+// ============================================
+const ERROR_CODES = {
+  // Hardware Errors
+  E001: { severity: 'CRITICAL', category: 'HARDWARE', message: 'Motor jam detected' },
+  E002: { severity: 'CRITICAL', category: 'HARDWARE', message: 'Gate malfunction' },
+  E003: { severity: 'ERROR', category: 'HARDWARE', message: 'Stepper motor timeout' },
+  E004: { severity: 'CRITICAL', category: 'HARDWARE', message: 'Compactor motor failure' },
+  
+  // Sensor Errors
+  E101: { severity: 'WARNING', category: 'SENSOR', message: 'Weight sensor needs calibration' },
+  E102: { severity: 'ERROR', category: 'SENSOR', message: 'Weight sensor failure' },
+  E103: { severity: 'ERROR', category: 'SENSOR', message: 'Camera connection lost' },
+  
+  // AI/Detection Errors
+  E201: { severity: 'WARNING', category: 'DETECTION', message: 'Low confidence detection' },
+  E202: { severity: 'ERROR', category: 'DETECTION', message: 'AI service timeout' },
+  E203: { severity: 'WARNING', category: 'DETECTION', message: 'Multiple detection retries' },
+  
+  // Communication Errors
+  E301: { severity: 'CRITICAL', category: 'COMMUNICATION', message: 'MQTT connection lost' },
+  E302: { severity: 'CRITICAL', category: 'COMMUNICATION', message: 'WebSocket disconnected' },
+  E303: { severity: 'ERROR', category: 'COMMUNICATION', message: 'Backend API timeout' },
+  
+  // Operational Errors
+  E401: { severity: 'CRITICAL', category: 'OPERATIONAL', message: 'Bin full' },
+  E402: { severity: 'ERROR', category: 'OPERATIONAL', message: 'Cycle timeout' },
+  E403: { severity: 'WARNING', category: 'OPERATIONAL', message: 'Session timeout' },
+  
+  // System Errors
+  E501: { severity: 'CRITICAL', category: 'SYSTEM', message: 'Watchdog timeout' },
+  E502: { severity: 'ERROR', category: 'SYSTEM', message: 'Memory usage critical' },
+  E503: { severity: 'ERROR', category: 'SYSTEM', message: 'Database error' },
+  E504: { severity: 'ERROR', category: 'SYSTEM', message: 'Module ID not available' }
 };
 
 // ============================================
@@ -100,7 +154,7 @@ const state = {
   ws: null,
   isReady: false,
   
-  // 🔄 PARALLEL COMPACTOR TRACKING
+  // Compactor tracking
   compactorRunning: false,
   compactorTimer: null,
   
@@ -111,21 +165,394 @@ const state = {
   currentUserData: null,
   isMember: false,
   isGuestSession: false,
-  
-  // Multi-item tracking
   itemsProcessed: 0,
   sessionStartTime: null,
   lastActivityTime: null,
   sessionTimeoutTimer: null,
   maxDurationTimer: null,
-  
   autoPhotoTimer: null,
   
   // Detection retry tracking
   detectionRetries: 0,
-  maxDetectionRetries: 3,
-  awaitingDetection: false
+  awaitingDetection: false,
+  
+  // Health tracking
+  health: {
+    lastHeartbeat: Date.now(),
+    uptime: 0,
+    totalCycles: 0,
+    errorCount: 0,
+    systemVitals: {
+      cpuUsage: 0,
+      memoryUsage: 0
+    }
+  }
 };
+
+// ============================================
+// DATABASE INITIALIZATION
+// ============================================
+let db = null;
+
+function initDatabase() {
+  return new Promise((resolve, reject) => {
+    db = new sqlite3.Database('./rvm-data.db', (err) => {
+      if (err) {
+        logError('E503', { error: err.message, action: 'database_init' });
+        reject(err);
+        return;
+      }
+      
+      console.log('📦 Database connected');
+      
+      db.serialize(() => {
+        // Sessions table
+        db.run(`CREATE TABLE IF NOT EXISTS sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_code TEXT NOT NULL,
+          session_id TEXT,
+          user_id TEXT,
+          user_name TEXT,
+          is_guest INTEGER DEFAULT 0,
+          start_time TEXT NOT NULL,
+          end_time TEXT,
+          items_processed INTEGER DEFAULT 0,
+          total_weight REAL DEFAULT 0,
+          synced INTEGER DEFAULT 0,
+          synced_at TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        // Items table
+        db.run(`CREATE TABLE IF NOT EXISTS items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_code TEXT NOT NULL,
+          material_type TEXT NOT NULL,
+          weight REAL NOT NULL,
+          ai_confidence INTEGER,
+          ai_class_name TEXT,
+          processed_time TEXT NOT NULL,
+          synced INTEGER DEFAULT 0,
+          synced_at TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        // Rejections table
+        db.run(`CREATE TABLE IF NOT EXISTS rejections (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_code TEXT,
+          reason TEXT NOT NULL,
+          ai_confidence INTEGER,
+          ai_class_name TEXT,
+          rejected_time TEXT NOT NULL,
+          synced INTEGER DEFAULT 0,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        // Errors table
+        db.run(`CREATE TABLE IF NOT EXISTS errors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          error_code TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          category TEXT NOT NULL,
+          message TEXT NOT NULL,
+          details TEXT,
+          error_time TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )`);
+        
+        // Indexes
+        db.run('CREATE INDEX IF NOT EXISTS idx_sessions_code ON sessions(session_code)');
+        db.run('CREATE INDEX IF NOT EXISTS idx_items_session ON items(session_code)');
+        db.run('CREATE INDEX IF NOT EXISTS idx_items_synced ON items(synced)');
+        db.run('CREATE INDEX IF NOT EXISTS idx_sessions_synced ON sessions(synced)');
+        
+        console.log('✅ Database initialized\n');
+        resolve();
+      });
+    });
+  });
+}
+
+// Database functions
+function saveSessionStart(sessionData) {
+  if (!db) return;
+  const stmt = db.prepare(`
+    INSERT INTO sessions (session_code, session_id, user_id, user_name, is_guest, start_time)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    sessionData.sessionCode,
+    sessionData.sessionId || null,
+    sessionData.userId || null,
+    sessionData.userName || null,
+    sessionData.isGuest ? 1 : 0,
+    new Date().toISOString()
+  );
+  stmt.finalize();
+}
+
+function saveSessionEnd(sessionCode, itemsProcessed, totalWeight) {
+  if (!db) return;
+  const stmt = db.prepare(`
+    UPDATE sessions 
+    SET end_time = ?, items_processed = ?, total_weight = ?
+    WHERE session_code = ? AND end_time IS NULL
+  `);
+  stmt.run(new Date().toISOString(), itemsProcessed, totalWeight, sessionCode);
+  stmt.finalize();
+}
+
+function saveItem(itemData) {
+  if (!db) return;
+  const stmt = db.prepare(`
+    INSERT INTO items (session_code, material_type, weight, ai_confidence, ai_class_name, processed_time)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    itemData.sessionCode,
+    itemData.material,
+    itemData.weight,
+    itemData.aiConfidence || null,
+    itemData.className || null,
+    new Date().toISOString()
+  );
+  stmt.finalize();
+}
+
+function saveRejection(rejectionData) {
+  if (!db) return;
+  const stmt = db.prepare(`
+    INSERT INTO rejections (session_code, reason, ai_confidence, ai_class_name, rejected_time)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    rejectionData.sessionCode || null,
+    rejectionData.reason,
+    rejectionData.aiConfidence || null,
+    rejectionData.className || null,
+    new Date().toISOString()
+  );
+  stmt.finalize();
+}
+
+function saveErrorToDatabase(errorData) {
+  if (!db) return;
+  const stmt = db.prepare(`
+    INSERT INTO errors (error_code, severity, category, message, details, error_time)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    errorData.code,
+    errorData.severity,
+    errorData.category,
+    errorData.message,
+    JSON.stringify(errorData.details),
+    errorData.timestamp
+  );
+  stmt.finalize();
+}
+
+// Sync pending data to backend
+async function syncPendingData() {
+  if (!db) return;
+  recordActivity('syncPendingData');
+  
+  try {
+    // Sync sessions
+    db.all('SELECT * FROM sessions WHERE synced = 0 LIMIT 50', async (err, sessions) => {
+      if (err) return;
+      for (const session of sessions) {
+        try {
+          await axios.post(`${CONFIG.backend.url}/api/sessions`, session, { timeout: 10000 });
+          db.run('UPDATE sessions SET synced = 1, synced_at = ? WHERE id = ?',
+            [new Date().toISOString(), session.id]);
+        } catch (error) {
+          // Will retry next sync
+        }
+      }
+    });
+    
+    // Sync items
+    db.all('SELECT * FROM items WHERE synced = 0 LIMIT 100', async (err, items) => {
+      if (err) return;
+      for (const item of items) {
+        try {
+          await axios.post(`${CONFIG.backend.url}/api/items`, item, { timeout: 10000 });
+          db.run('UPDATE items SET synced = 1, synced_at = ? WHERE id = ?',
+            [new Date().toISOString(), item.id]);
+        } catch (error) {
+          // Will retry next sync
+        }
+      }
+    });
+  } catch (error) {
+    logError('E303', { function: 'syncPendingData', error: error.message });
+  }
+}
+
+// ============================================
+// ERROR LOGGING SYSTEM
+// ============================================
+function logError(code, details = {}, shouldPublish = true) {
+  if (!ERROR_CODES[code]) {
+    console.error(`⚠️ Unknown error code: ${code}`);
+    return;
+  }
+  
+  const errorData = {
+    code,
+    severity: ERROR_CODES[code].severity,
+    category: ERROR_CODES[code].category,
+    message: ERROR_CODES[code].message,
+    details,
+    deviceId: CONFIG.device.id,
+    sessionCode: state.sessionCode || null,
+    timestamp: new Date().toISOString()
+  };
+  
+  state.health.errorCount++;
+  
+  const severityIcons = {
+    INFO: '💡',
+    WARNING: '⚠️',
+    ERROR: '❌',
+    CRITICAL: '🚨'
+  };
+  
+  console.error(
+    `${severityIcons[errorData.severity]} [${errorData.code}] ${errorData.message}`,
+    Object.keys(details).length ? `| ${JSON.stringify(details)}` : ''
+  );
+  
+  // Save to database
+  saveErrorToDatabase(errorData);
+  
+  // Publish to MQTT
+  if (shouldPublish && mqttClient && mqttClient.connected) {
+    mqttClient.publish(CONFIG.mqtt.topics.errors, JSON.stringify(errorData), { qos: 1 });
+  }
+  
+  return errorData;
+}
+
+// ============================================
+// WATCHDOG SYSTEM
+// ============================================
+let lastActivityTimestamp = Date.now();
+let watchdogTimer = null;
+let watchdogAlerted = false;
+
+function recordActivity(operation) {
+  lastActivityTimestamp = Date.now();
+  watchdogAlerted = false;
+}
+
+function startWatchdog() {
+  if (!CONFIG.watchdog.enabled) return;
+  
+  console.log('🐕 Watchdog started\n');
+  
+  watchdogTimer = setInterval(() => {
+    const timeSinceActivity = Date.now() - lastActivityTimestamp;
+    
+    // Warning level
+    if (timeSinceActivity > CONFIG.watchdog.activityTimeout && !watchdogAlerted) {
+      logError('E501', {
+        timeSinceActivity: Math.round(timeSinceActivity / 1000),
+        level: 'WARNING'
+      });
+      watchdogAlerted = true;
+      
+      mqttClient.publish(CONFIG.mqtt.topics.watchdog, JSON.stringify({
+        deviceId: CONFIG.device.id,
+        status: 'warning',
+        timeSinceActivity: timeSinceActivity,
+        timestamp: new Date().toISOString()
+      }), { qos: 1 });
+    }
+    
+    // Critical level - restart
+    if (timeSinceActivity > CONFIG.watchdog.criticalTimeout) {
+      logError('E501', {
+        timeSinceActivity: Math.round(timeSinceActivity / 1000),
+        level: 'CRITICAL',
+        action: 'restart'
+      });
+      
+      console.error('🚨 WATCHDOG: System frozen - restarting!\n');
+      
+      mqttClient.publish(CONFIG.mqtt.topics.watchdog, JSON.stringify({
+        deviceId: CONFIG.device.id,
+        status: 'critical',
+        action: 'restart',
+        timestamp: new Date().toISOString()
+      }), { qos: 1 });
+      
+      setTimeout(() => process.exit(1), 2000);
+    }
+  }, CONFIG.watchdog.checkInterval);
+}
+
+// ============================================
+// HEALTH MONITORING
+// ============================================
+function updateSystemVitals() {
+  // CPU usage
+  const cpus = os.cpus();
+  let totalIdle = 0, totalTick = 0;
+  cpus.forEach(cpu => {
+    for (let type in cpu.times) {
+      totalTick += cpu.times[type];
+    }
+    totalIdle += cpu.times.idle;
+  });
+  state.health.systemVitals.cpuUsage = Math.round(100 - (100 * totalIdle / totalTick));
+  
+  // Memory usage
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  state.health.systemVitals.memoryUsage = Math.round(((totalMem - freeMem) / totalMem) * 100);
+  
+  state.health.lastHeartbeat = Date.now();
+  state.health.uptime = Math.round(process.uptime());
+}
+
+// Heartbeat - every 5 seconds
+setInterval(() => {
+  updateSystemVitals();
+  
+  if (state.health.systemVitals.cpuUsage > 90) {
+    logError('E502', { cpuUsage: state.health.systemVitals.cpuUsage });
+  }
+  
+  if (state.health.systemVitals.memoryUsage > 90) {
+    logError('E502', { memoryUsage: state.health.systemVitals.memoryUsage });
+  }
+}, CONFIG.health.heartbeatInterval);
+
+// Publish health - every 30 seconds
+setInterval(() => {
+  if (!mqttClient || !mqttClient.connected) return;
+  
+  const healthStatus = {
+    deviceId: CONFIG.device.id,
+    timestamp: new Date().toISOString(),
+    uptime: state.health.uptime,
+    status: state.isReady ? 'ready' : 'busy',
+    vitals: state.health.systemVitals,
+    session: {
+      active: state.autoCycleEnabled,
+      itemsProcessed: state.itemsProcessed,
+      totalCycles: state.health.totalCycles
+    },
+    errors: {
+      count: state.health.errorCount
+    }
+  };
+  
+  mqttClient.publish(CONFIG.mqtt.topics.health, JSON.stringify(healthStatus), { qos: 1 });
+}, CONFIG.health.publishInterval);
 
 // ============================================
 // UTILITY FUNCTIONS
@@ -159,17 +586,16 @@ function determineMaterialType(aiData) {
   }
   
   const confidencePercent = Math.round(probability * 100);
-  const thresholdPercent = Math.round(threshold * 100);
   
   if (materialType !== 'UNKNOWN' && probability < threshold) {
     const relaxedThreshold = threshold * 0.3;
     
     if (hasStrongKeyword && probability >= relaxedThreshold) {
-      console.log(`✅ ${materialType} detected via keyword match (${confidencePercent}% confidence, relaxed threshold)`);
+      console.log(`✅ ${materialType} detected via keyword (${confidencePercent}%)`);
       return materialType;
     }
     
-    console.log(`⚠️ ${materialType} detected but confidence too low (${confidencePercent}% < ${thresholdPercent}%)`);
+    console.log(`⚠️ ${materialType} low confidence (${confidencePercent}%)`);
     return 'UNKNOWN';
   }
   
@@ -184,9 +610,12 @@ function determineMaterialType(aiData) {
 // HARDWARE CONTROL
 // ============================================
 async function executeCommand(action, params = {}) {
+  recordActivity(`executeCommand:${action}`);
+  
   const deviceType = 1;
   
   if (!state.moduleId && action !== 'getModuleId') {
+    logError('E504', { action });
     throw new Error('Module ID not available');
   }
   
@@ -239,10 +668,11 @@ async function executeCommand(action, params = {}) {
       break;
       
     default:
+      logError('E001', { action, message: 'Unknown action' });
       throw new Error(`Unknown action: ${action}`);
   }
   
-  console.log(`🔧 Executing: ${action}`, apiPayload);
+  console.log(`🔧 ${action}`);
   
   try {
     await axios.post(apiUrl, apiPayload, {
@@ -254,21 +684,19 @@ async function executeCommand(action, params = {}) {
     if (action === 'getWeight') await delay(2000);
     
   } catch (error) {
-    console.error(`❌ ${action} failed:`, error.message);
+    logError('E001', { action, error: error.message });
     throw error;
   }
 }
 
 // ============================================
-// COMPACTOR MANAGEMENT (PARALLEL OPERATION)
+// COMPACTOR MANAGEMENT
 // ============================================
 async function startCompactor() {
-  // Wait if compactor is already running
   if (state.compactorRunning) {
-    console.log('⏳ Waiting for previous compactor cycle to complete...');
+    console.log('⏳ Waiting for compactor...');
     const startWait = Date.now();
     
-    // Wait with timeout
     while (state.compactorRunning && (Date.now() - startWait) < CONFIG.timing.compactor + 5000) {
       await delay(500);
     }
@@ -280,61 +708,58 @@ async function startCompactor() {
     }
   }
   
-  console.log('🎯 Step 5: Starting Compactor (parallel operation)');
+  console.log('🎯 Compactor starting (background)');
   
-  // Start compactor
   state.compactorRunning = true;
   await executeCommand('customMotor', CONFIG.motors.compactor.start);
   
-  // Set timer to stop compactor after configured duration
   if (state.compactorTimer) {
     clearTimeout(state.compactorTimer);
   }
   
   state.compactorTimer = setTimeout(async () => {
-    console.log('✅ Step 5 complete: Compactor finished (background)');
+    console.log('✅ Compactor finished');
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     state.compactorRunning = false;
     state.compactorTimer = null;
   }, CONFIG.timing.compactor);
   
-  console.log(`⚡ Compactor running in background (${CONFIG.timing.compactor / 1000}s)`);
-  console.log('✅ Ready for next bottle immediately!\n');
+  console.log('⚡ Ready for next bottle!\n');
 }
 
 // ============================================
 // REJECTION HANDLING
 // ============================================
 async function executeRejectionCycle() {
+  recordActivity('executeRejectionCycle');
+  
   console.log('\n========================================');
-  console.log('❌ REJECTION CYCLE - UNRECOGNIZED ITEM');
+  console.log('❌ REJECTION - UNRECOGNIZED ITEM');
   console.log('========================================\n');
 
   try {
-    console.log('🎯 Reversing belt to reject bin (item rejected before sorting)');
+    console.log('🎯 Reversing to reject bin');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    console.log('✅ Item dropped into reject bin\n');
+    console.log('✅ Item rejected\n');
 
-    console.log('========================================');
-    console.log('✅ REJECTION CYCLE COMPLETE');
-    console.log('========================================\n');
-
-    const rejectionData = {
+    saveRejection({
+      sessionCode: state.sessionCode,
+      reason: 'LOW_CONFIDENCE',
+      aiConfidence: state.aiResult?.matchRate,
+      className: state.aiResult?.className
+    });
+    
+    mqttClient.publish('rvm/RVM-3101/item/rejected', JSON.stringify({
       deviceId: CONFIG.device.id,
       reason: 'LOW_CONFIDENCE',
-      userId: state.currentUserId || null,
-      sessionId: state.sessionId || null,
-      sessionCode: state.sessionCode || null,
-      isGuest: state.isGuestSession,
+      sessionCode: state.sessionCode,
       timestamp: new Date().toISOString()
-    };
-    
-    mqttClient.publish('rvm/RVM-3101/item/rejected', JSON.stringify(rejectionData));
+    }));
 
   } catch (error) {
-    console.error('❌ Rejection cycle error:', error.message);
+    logError('E402', { function: 'executeRejectionCycle', error: error.message });
   }
 
   state.aiResult = null;
@@ -342,28 +767,17 @@ async function executeRejectionCycle() {
   state.detectionRetries = 0;
   state.awaitingDetection = false;
   state.cycleInProgress = false;
-  
-  console.log('📊 State after rejection:');
-  console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
-  console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
-  console.log(`   - awaitingDetection: ${state.awaitingDetection}\n`);
 
   if (state.autoCycleEnabled) {
-    console.log('🔄 Ready for next item...\n');
-    
-    console.log('🚪 Ensuring gate is open for next item...');
+    console.log('🚪 Opening gate for next item');
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
-    console.log('✅ Gate confirmed open, ready for next bottle!\n');
     
-    if (state.autoPhotoTimer) {
-      clearTimeout(state.autoPhotoTimer);
-    }
+    if (state.autoPhotoTimer) clearTimeout(state.autoPhotoTimer);
     
-    console.log('⏱️  Auto photo timer: 5 seconds...\n');
     state.autoPhotoTimer = setTimeout(() => {
       if (!state.cycleInProgress && !state.awaitingDetection) {
-        console.log('📸 AUTO PHOTO (after rejection)\n');
+        console.log('📸 AUTO PHOTO\n');
         state.awaitingDetection = true;
         executeCommand('takePhoto');
       }
@@ -372,16 +786,18 @@ async function executeRejectionCycle() {
 }
 
 // ============================================
-// SESSION TIMEOUT HANDLING
+// SESSION TIMEOUT
 // ============================================
 async function handleSessionTimeout(reason) {
+  recordActivity('handleSessionTimeout');
+  
   console.log('\n========================================');
   console.log('⏱️  SESSION TIMEOUT');
-  console.log('========================================');
   console.log(`Reason: ${reason}`);
-  console.log(`Items processed: ${state.itemsProcessed}`);
-  console.log(`Session duration: ${Math.round((Date.now() - state.sessionStartTime) / 1000)}s`);
+  console.log(`Items: ${state.itemsProcessed}`);
   console.log('========================================\n');
+  
+  logError('E403', { reason, itemsProcessed: state.itemsProcessed });
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
@@ -389,21 +805,14 @@ async function handleSessionTimeout(reason) {
     event: 'session_timeout',
     reason: reason,
     itemsProcessed: state.itemsProcessed,
-    userId: state.currentUserId,
-    sessionId: state.sessionId,
-    sessionCode: state.sessionCode,
-    isGuest: state.isGuestSession,
     timestamp: new Date().toISOString()
   }));
   
-  // Normal timeout - wait for compactor to complete last bottle
   await resetSystemForNextUser(false);
 }
 
 function resetInactivityTimer() {
-  if (state.sessionTimeoutTimer) {
-    clearTimeout(state.sessionTimeoutTimer);
-  }
+  if (state.sessionTimeoutTimer) clearTimeout(state.sessionTimeoutTimer);
   
   state.lastActivityTime = Date.now();
   
@@ -415,9 +824,7 @@ function resetInactivityTimer() {
 function startSessionTimers() {
   resetInactivityTimer();
   
-  if (state.maxDurationTimer) {
-    clearTimeout(state.maxDurationTimer);
-  }
+  if (state.maxDurationTimer) clearTimeout(state.maxDurationTimer);
   
   state.maxDurationTimer = setTimeout(() => {
     handleSessionTimeout('max_duration');
@@ -440,15 +847,17 @@ function clearSessionTimers() {
 // SESSION MANAGEMENT
 // ============================================
 async function startSession(isMember, sessionData) {
+  recordActivity('startSession');
+  
   console.log('\n========================================');
-  console.log(`🎬 STARTING ${isMember ? 'MEMBER' : 'GUEST'} SESSION`);
+  console.log(`🎬 ${isMember ? 'MEMBER' : 'GUEST'} SESSION START`);
   console.log('========================================');
   
   state.isReady = false;
   
   if (isMember) {
     console.log(`👤 User: ${sessionData.userName || sessionData.userId}`);
-    console.log(`🔑 Session Code: ${sessionData.sessionCode}`);
+    console.log(`🔑 Code: ${sessionData.sessionCode}`);
     state.currentUserId = sessionData.userId;
     state.currentUserData = {
       name: sessionData.userName,
@@ -459,8 +868,7 @@ async function startSession(isMember, sessionData) {
     state.isGuestSession = false;
     state.sessionCode = sessionData.sessionCode;
   } else {
-    console.log(`🎫 Guest Session: ${sessionData.sessionCode}`);
-    console.log(`📝 Session ID: ${sessionData.sessionId}`);
+    console.log(`🎫 Guest: ${sessionData.sessionCode}`);
     state.currentUserId = null;
     state.sessionId = sessionData.sessionId;
     state.sessionCode = sessionData.sessionCode;
@@ -477,17 +885,13 @@ async function startSession(isMember, sessionData) {
   state.detectionRetries = 0;
   state.awaitingDetection = false;
   
-  console.log(`⏱️  Session timeouts:`);
-  console.log(`   - Inactivity timeout: ${CONFIG.timing.sessionTimeout / 1000}s (resets on each bottle)`);
-  console.log(`   - Maximum duration: ${CONFIG.timing.sessionMaxDuration / 1000}s (absolute limit)\n`);
   startSessionTimers();
   
-  console.log('🔧 Resetting system...');
+  console.log('🔧 Resetting system');
   await executeCommand('customMotor', CONFIG.motors.belt.stop);
   
-  // 🔄 Stop compactor if running from previous session
   if (state.compactorRunning) {
-    console.log('⏳ Waiting for compactor to complete...');
+    console.log('⏳ Waiting for compactor');
     await executeCommand('customMotor', CONFIG.motors.compactor.stop);
     if (state.compactorTimer) {
       clearTimeout(state.compactorTimer);
@@ -500,25 +904,29 @@ async function startSession(isMember, sessionData) {
   await delay(2000);
   console.log('✅ Reset complete\n');
   
-  console.log('⚖️ Calibrating weight sensor (ensure machine is empty)...');
+  console.log('⚖️ Calibrating weight sensor');
   await executeCommand('calibrateWeight');
   await delay(1500);
-  console.log('✅ Weight sensor zeroed\n');
+  console.log('✅ Calibrated\n');
   
-  console.log('🚪 Opening gate...');
+  console.log('🚪 Opening gate');
   await executeCommand('openGate');
   await delay(CONFIG.timing.gateOperation);
-  console.log('✅ Gate opened!\n');
+  console.log('✅ Gate open\n');
   
-  console.log('⏱️  Auto photo timer: 5 seconds...');
-  console.log('💡 System will validate weight before processing\n');
+  // Save session to database
+  saveSessionStart({
+    sessionCode: state.sessionCode,
+    sessionId: state.sessionId,
+    userId: state.currentUserId,
+    userName: state.currentUserData?.name,
+    isGuest: !isMember
+  });
   
-  if (state.autoPhotoTimer) {
-    clearTimeout(state.autoPhotoTimer);
-  }
+  if (state.autoPhotoTimer) clearTimeout(state.autoPhotoTimer);
   
   state.autoPhotoTimer = setTimeout(() => {
-    console.log('📸 AUTO PHOTO (timer-based detection)\n');
+    console.log('📸 AUTO PHOTO\n');
     state.awaitingDetection = true;
     executeCommand('takePhoto');
   }, CONFIG.timing.autoPhotoDelay);
@@ -528,32 +936,24 @@ async function startSession(isMember, sessionData) {
     status: 'session_active',
     event: 'session_started',
     sessionType: isMember ? 'member' : 'guest',
-    userId: state.currentUserId,
-    sessionId: state.sessionId,
-    sessionCode: state.sessionCode,
     timestamp: new Date().toISOString()
   }));
 }
 
 async function resetSystemForNextUser(forceStop = false) {
+  recordActivity('resetSystemForNextUser');
+  
   console.log('\n========================================');
-  console.log('🔄 RESETTING SYSTEM FOR NEXT USER');
-  console.log('========================================');
-  console.log(`📊 Current State Before Reset:`);
-  console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
-  console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
-  console.log(`   - compactorRunning: ${state.compactorRunning}`);
-  console.log(`   - isReady: ${state.isReady}`);
-  console.log(`   - forceStop: ${forceStop}`);
+  console.log('🔄 RESETTING FOR NEXT USER');
   console.log('========================================\n');
   
   if (state.cycleInProgress) {
-    console.log('⚠️ Cannot reset - cycle in progress! Will retry in 2 seconds...\n');
+    console.log('⚠️ Cycle in progress - retrying\n');
     setTimeout(() => resetSystemForNextUser(forceStop), 2000);
     return;
   }
   
-  console.log('🛑 Force stopping all operations...');
+  console.log('🛑 Stopping operations');
   state.autoCycleEnabled = false;
   state.awaitingDetection = false;
   state.detectionRetries = 0;
@@ -563,35 +963,28 @@ async function resetSystemForNextUser(forceStop = false) {
     clearTimeout(state.autoPhotoTimer);
     state.autoPhotoTimer = null;
   }
-  console.log('✅ Operations stopped\n');
   
   try {
-    // 🔄 Handle compactor gracefully
+    // Handle compactor
     if (state.compactorRunning) {
       if (forceStop) {
-        // Emergency: Force stop immediately
-        console.log('🚨 FORCE STOPPING compactor (emergency)...');
+        console.log('🚨 Force stopping compactor');
         await executeCommand('customMotor', CONFIG.motors.compactor.stop);
         if (state.compactorTimer) {
           clearTimeout(state.compactorTimer);
           state.compactorTimer = null;
         }
         state.compactorRunning = false;
-        console.log('✅ Compactor force stopped\n');
       } else {
-        // Normal session end: Wait for compactor to complete naturally
-        console.log('⏳ Waiting for compactor to complete last bottle...');
-        const maxWaitTime = CONFIG.timing.compactor + 2000; // Add 2s buffer
+        console.log('⏳ Waiting for compactor to finish');
+        const maxWait = CONFIG.timing.compactor + 2000;
         const startWait = Date.now();
         
-        while (state.compactorRunning && (Date.now() - startWait) < maxWaitTime) {
+        while (state.compactorRunning && (Date.now() - startWait) < maxWait) {
           await delay(1000);
-          const remainingTime = Math.ceil((maxWaitTime - (Date.now() - startWait)) / 1000);
-          console.log(`   ⏱️  Compactor running... ${remainingTime}s remaining`);
         }
         
         if (state.compactorRunning) {
-          // Timeout - force stop
           console.log('⚠️ Compactor timeout - forcing stop');
           await executeCommand('customMotor', CONFIG.motors.compactor.stop);
           if (state.compactorTimer) {
@@ -599,26 +992,33 @@ async function resetSystemForNextUser(forceStop = false) {
             state.compactorTimer = null;
           }
           state.compactorRunning = false;
-        } else {
-          console.log('✅ Compactor completed naturally\n');
         }
       }
     }
     
-    console.log('🚪 Closing gate...');
+    console.log('🚪 Closing gate');
     await executeCommand('closeGate');
     await delay(CONFIG.timing.gateOperation);
-    console.log('✅ Gate closed\n');
     
-    console.log('🛑 Stopping all motors...');
+    console.log('🛑 Stopping motors');
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
     
-    console.log('🏠 Stepper will reset at next session start\n');
-    
   } catch (error) {
-    console.error('❌ Reset error:', error.message);
+    logError('E001', { function: 'resetSystemForNextUser', error: error.message });
   }
   
+  // Calculate total weight
+  if (db && state.sessionCode) {
+    db.get('SELECT SUM(weight) as total FROM items WHERE session_code = ?',
+      [state.sessionCode],
+      (err, row) => {
+        const totalWeight = (row && row.total) || 0;
+        saveSessionEnd(state.sessionCode, state.itemsProcessed, totalWeight);
+      }
+    );
+  }
+  
+  // Clear state
   state.aiResult = null;
   state.weight = null;
   state.currentUserId = null;
@@ -646,13 +1046,7 @@ async function resetSystemForNextUser(forceStop = false) {
   state.isReady = true;
   
   console.log('========================================');
-  console.log('✅ SYSTEM READY FOR NEXT USER');
-  console.log('========================================');
-  console.log(`📊 Final State After Reset:`);
-  console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
-  console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
-  console.log(`   - compactorRunning: ${state.compactorRunning}`);
-  console.log(`   - isReady: ${state.isReady}`);
+  console.log('✅ READY FOR NEXT USER');
   console.log('========================================\n');
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
@@ -662,85 +1056,87 @@ async function resetSystemForNextUser(forceStop = false) {
     isReady: true,
     timestamp: new Date().toISOString()
   }), { retain: false });
-  
-  console.log('📤 Reset complete notification sent to backend\n');
-  console.log('🟢 SYSTEM IS NOW READY FOR QR SCAN OR GUEST SESSION\n');
 }
 
 // ============================================
-// AUTO CYCLE PROCESSING (OPTIMIZED)
+// AUTO CYCLE
 // ============================================
 async function executeAutoCycle() {
+  recordActivity('executeAutoCycle');
+  
   if (!state.aiResult || !state.weight || state.weight.weight <= 1) {
-    console.log('⚠️ Missing data for auto cycle');
+    console.log('⚠️ Missing data for cycle');
     state.cycleInProgress = false;
     return;
   }
 
   state.itemsProcessed++;
+  state.health.totalCycles++;
   
   const cycleData = {
     deviceId: CONFIG.device.id,
     material: state.aiResult.materialType,
     weight: state.weight.weight,
-    userId: state.currentUserId || null,
-    sessionId: state.sessionId || null,
-    sessionCode: state.sessionCode || null,
+    sessionCode: state.sessionCode,
     isGuest: state.isGuestSession,
     itemNumber: state.itemsProcessed,
     timestamp: new Date().toISOString()
   };
   
   console.log('\n========================================');
-  console.log(`🤖 AUTO CYCLE START - ITEM #${state.itemsProcessed}`);
-  console.log('========================================');
-  console.log(`📦 Material: ${cycleData.material}`);
-  console.log(`⚖️  Weight: ${cycleData.weight}g`);
+  console.log(`🤖 CYCLE #${state.itemsProcessed}`);
+  console.log(`📦 ${cycleData.material} | ⚖️ ${cycleData.weight}g`);
   console.log('========================================\n');
 
   try {
-    console.log('🎯 Step 1: Belt → Stepper');
+    console.log('🎯 Belt → Stepper');
     await executeCommand('customMotor', CONFIG.motors.belt.toStepper);
     await delay(CONFIG.timing.beltToStepper);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    console.log('✅ Step 1 complete\n');
+    console.log('✅ Step 1\n');
 
-    console.log('🎯 Step 2: Stepper Rotation');
+    console.log('🎯 Stepper Rotation');
     const targetPosition = cycleData.material === 'METAL_CAN' 
       ? CONFIG.motors.stepper.positions.metalCan
       : CONFIG.motors.stepper.positions.plasticBottle;
     
     await executeCommand('stepperMotor', { position: targetPosition });
     await delay(CONFIG.timing.stepperRotate);
-    console.log('✅ Step 2 complete\n');
+    console.log('✅ Step 2\n');
 
-    console.log('🎯 Step 3: Reverse Belt');
+    console.log('🎯 Reverse Belt');
     await executeCommand('customMotor', CONFIG.motors.belt.reverse);
     await delay(CONFIG.timing.beltReverse);
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
-    console.log('✅ Step 3 complete\n');
+    console.log('✅ Step 3\n');
 
-    console.log('🎯 Step 4: Reset Stepper');
+    console.log('🎯 Reset Stepper');
     await executeCommand('stepperMotor', { position: CONFIG.motors.stepper.positions.home });
     await delay(CONFIG.timing.stepperReset);
-    console.log('✅ Step 4 complete\n');
+    console.log('✅ Step 4\n');
 
-    // ⚡ KEY IMPROVEMENT: Start compactor in parallel
+    // Start compactor in parallel
     await startCompactor();
 
-    console.log('📤 Publishing cycle complete...');
+    // Save to database
+    saveItem({
+      sessionCode: state.sessionCode,
+      material: state.aiResult.materialType,
+      weight: state.weight.weight,
+      aiConfidence: state.aiResult.matchRate,
+      className: state.aiResult.className
+    });
+    
     mqttClient.publish(CONFIG.mqtt.topics.cycleComplete, JSON.stringify(cycleData));
-    console.log('✅ Cycle complete published\n');
 
     console.log('========================================');
-    console.log(`✅ AUTO CYCLE COMPLETE - ITEM #${state.itemsProcessed}`);
-    console.log(`⚡ Compactor running in background - ready for next bottle!`);
+    console.log(`✅ CYCLE #${state.itemsProcessed} COMPLETE`);
     console.log('========================================\n');
     
     resetInactivityTimer();
 
   } catch (error) {
-    console.error('❌ Auto cycle error:', error.message);
+    logError('E402', { function: 'executeAutoCycle', error: error.message });
   }
 
   state.aiResult = null;
@@ -749,30 +1145,17 @@ async function executeAutoCycle() {
   state.cycleInProgress = false;
   state.detectionRetries = 0;
   state.awaitingDetection = false;
-  
-  console.log('📊 State after cycle:');
-  console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
-  console.log(`   - autoCycleEnabled: ${state.autoCycleEnabled}`);
-  console.log(`   - compactorRunning: ${state.compactorRunning} (background)`);
-  console.log(`   - awaitingDetection: ${state.awaitingDetection}\n`);
 
   if (state.autoCycleEnabled) {
-    console.log('🔄 Ready for next item immediately (session still active)...\n');
-    console.log(`📊 Session stats: ${state.itemsProcessed} items processed\n`);
-    
-    console.log('🚪 Ensuring gate is open for next item...');
+    console.log('🚪 Opening gate');
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
-    console.log('✅ Gate confirmed open, ready for next bottle!\n');
     
-    if (state.autoPhotoTimer) {
-      clearTimeout(state.autoPhotoTimer);
-    }
+    if (state.autoPhotoTimer) clearTimeout(state.autoPhotoTimer);
     
-    console.log('⏱️  Auto photo timer: 5 seconds...\n');
     state.autoPhotoTimer = setTimeout(() => {
       if (!state.cycleInProgress && !state.awaitingDetection) {
-        console.log('📸 AUTO PHOTO (next item detection)\n');
+        console.log('📸 AUTO PHOTO\n');
         state.awaitingDetection = true;
         executeCommand('takePhoto');
       }
@@ -781,10 +1164,10 @@ async function executeAutoCycle() {
 }
 
 // ============================================
-// WEBSOCKET CONNECTION
+// WEBSOCKET
 // ============================================
 function connectWebSocket() {
-  console.log('🔌 Connecting to WebSocket...');
+  console.log('🔌 Connecting WebSocket');
   
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
@@ -793,6 +1176,8 @@ function connectWebSocket() {
   });
   
   state.ws.on('message', async (data) => {
+    recordActivity('websocket:message');
+    
     try {
       const message = JSON.parse(data.toString());
       
@@ -820,22 +1205,22 @@ function connectWebSocket() {
         
         if (state.autoCycleEnabled && state.awaitingDetection) {
           if (state.aiResult.materialType !== 'UNKNOWN') {
-            console.log('✅ Material identified, proceeding to weight...\n');
+            console.log('✅ Material identified\n');
             state.detectionRetries = 0;
             state.awaitingDetection = false;
             setTimeout(() => executeCommand('getWeight'), 500);
           } else {
             state.detectionRetries++;
-            console.log(`⚠️ UNKNOWN material (Attempt ${state.detectionRetries}/${CONFIG.detection.maxRetries})\n`);
+            console.log(`⚠️ UNKNOWN (${state.detectionRetries}/${CONFIG.detection.maxRetries})\n`);
             
             if (state.detectionRetries < CONFIG.detection.maxRetries) {
-              console.log(`🔄 Retrying photo in ${CONFIG.detection.retryDelay/1000} seconds...\n`);
+              logError('E201', { attempt: state.detectionRetries });
               setTimeout(() => {
-                console.log('📸 RETRY PHOTO!\n');
+                console.log('📸 RETRY\n');
                 executeCommand('takePhoto');
               }, CONFIG.detection.retryDelay);
             } else {
-              console.log('❌ Max retries reached, rejecting item...\n');
+              logError('E203', { maxRetries: CONFIG.detection.maxRetries });
               state.awaitingDetection = false;
               state.cycleInProgress = true;
               setTimeout(() => executeRejectionCycle(), 1000);
@@ -857,18 +1242,14 @@ function connectWebSocket() {
           timestamp: new Date().toISOString()
         };
         
-        console.log(`⚖️ Weight: ${state.weight.weight}g (raw: ${state.weight.rawWeight})`);
-        
-        if (state.weight.weight > 500 && state.calibrationAttempts === 0) {
-          console.log(`⚠️ WARNING: Suspiciously high weight detected (${state.weight.weight}g)`);
-          console.log(`⚠️ This may indicate scale needs zeroing/calibration\n`);
-        }
+        console.log(`⚖️ Weight: ${state.weight.weight}g`);
         
         mqttClient.publish(CONFIG.mqtt.topics.weightResult, JSON.stringify(state.weight));
         
         if (state.weight.weight <= 0 && state.calibrationAttempts < 2) {
           state.calibrationAttempts++;
-          console.log(`⚠️ Calibrating (${state.calibrationAttempts}/2)...\n`);
+          console.log(`⚠️ Calibrating (${state.calibrationAttempts}/2)\n`);
+          logError('E101', { attempt: state.calibrationAttempts });
           setTimeout(async () => {
             await executeCommand('calibrateWeight');
             setTimeout(() => executeCommand('getWeight'), 1000);
@@ -880,25 +1261,18 @@ function connectWebSocket() {
         
         if (state.autoCycleEnabled && state.aiResult && !state.cycleInProgress) {
           if (state.weight.weight < CONFIG.detection.minValidWeight) {
-            console.log(`\n⚠️ ========================================`);
-            console.log(`⚠️ WEIGHT TOO LOW: ${state.weight.weight}g`);
-            console.log(`⚠️ Minimum required: ${CONFIG.detection.minValidWeight}g`);
-            console.log(`⚠️ Likely empty machine or sensor error`);
-            console.log(`⚠️ Skipping cycle - waiting for real bottle`);
-            console.log(`⚠️ ========================================\n`);
+            console.log(`\n⚠️ Weight too low: ${state.weight.weight}g\n`);
             
             state.aiResult = null;
             state.weight = null;
             state.awaitingDetection = false;
             state.detectionRetries = 0;
             
-            if (state.autoPhotoTimer) {
-              clearTimeout(state.autoPhotoTimer);
-            }
-            console.log('⏱️  Retrying in 5 seconds...\n');
+            if (state.autoPhotoTimer) clearTimeout(state.autoPhotoTimer);
+            
             state.autoPhotoTimer = setTimeout(() => {
               if (!state.cycleInProgress && !state.awaitingDetection) {
-                console.log('📸 AUTO PHOTO (retry after low weight)\n');
+                console.log('📸 AUTO PHOTO\n');
                 state.awaitingDetection = true;
                 executeCommand('takePhoto');
               }
@@ -915,46 +1289,33 @@ function connectWebSocket() {
       
       if (message.function === 'deviceStatus') {
         const code = parseInt(message.data) || -1;
-        console.log(`📊 Device Status Code: ${code}`);
+        console.log(`📊 Device Status: ${code}`);
         
         if (code >= 0 && code <= 3) {
-          const binNames = ['Left (PET)', 'Middle (Metal)', 'Right', 'Glass'];
-          console.log(`⚠️ Bin Full Alert: ${binNames[code]} bin is full!\n`);
-        }
-        
-        if (code === 4 && state.autoCycleEnabled && !state.cycleInProgress && !state.awaitingDetection) {
-          console.log('\n========================================');
-          console.log('👁️  OBJECT DETECTED BY SENSOR (UNEXPECTED!)');
-          console.log('========================================\n');
-          state.awaitingDetection = true;
-          state.detectionRetries = 0;
-          
-          if (state.autoPhotoTimer) {
-            clearTimeout(state.autoPhotoTimer);
-            state.autoPhotoTimer = null;
-          }
-          setTimeout(() => executeCommand('takePhoto'), 1000);
+          const bins = ['PET', 'Metal', 'Right', 'Glass'];
+          logError('E401', { bin: bins[code], code });
         }
         return;
       }
       
     } catch (error) {
-      console.error('❌ WS error:', error.message);
+      logError('E302', { function: 'websocket:message', error: error.message });
     }
   });
   
   state.ws.on('close', () => {
-    console.log('⚠️ WS closed, reconnecting...');
+    logError('E302', { event: 'close' });
+    console.log('⚠️ WebSocket closed - reconnecting\n');
     setTimeout(connectWebSocket, 5000);
   });
   
   state.ws.on('error', (error) => {
-    console.error('❌ WS error:', error.message);
+    logError('E302', { event: 'error', error: error.message });
   });
 }
 
 // ============================================
-// MQTT CONNECTION
+// MQTT
 // ============================================
 const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
   username: CONFIG.mqtt.username,
@@ -980,53 +1341,28 @@ mqttClient.on('connect', () => {
   
   connectWebSocket();
   
-  setTimeout(() => {
-    requestModuleId();
-  }, 2000);
+  setTimeout(() => requestModuleId(), 2000);
+});
+
+mqttClient.on('error', (error) => {
+  logError('E301', { error: error.message });
 });
 
 mqttClient.on('message', async (topic, message) => {
+  recordActivity(`mqtt:${topic}`);
+  
   try {
     const payload = JSON.parse(message.toString());
     
     if (topic === CONFIG.mqtt.topics.qrScan) {
-      console.log('\n========================================');
-      console.log('📱 QR SCAN RECEIVED');
-      console.log('========================================');
-      console.log(`👤 User: ${payload.userName || payload.userId}`);
-      console.log(`🔑 Session Code: ${payload.sessionCode}`);
-      console.log(`📊 Current State:`);
-      console.log(`   - isReady: ${state.isReady}`);
-      console.log(`   - cycleInProgress: ${state.cycleInProgress}`);
-      console.log(`   - compactorRunning: ${state.compactorRunning}`);
-      console.log('========================================\n');
+      console.log('\n📱 QR SCAN RECEIVED\n');
       
-      if (!state.isReady) {
-        console.log('❌ SYSTEM NOT READY - Rejecting QR scan\n');
-        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
-          deviceId: CONFIG.device.id,
-          status: 'busy',
-          event: 'qr_rejected',
-          reason: 'system_not_ready',
-          timestamp: new Date().toISOString()
-        }));
-        return;
-      }
-      
-      if (!state.moduleId) {
-        console.log('❌ MODULE ID NOT SET - Cannot start session\n');
-        await requestModuleId();
-        await delay(1000);
-        if (!state.moduleId) return;
-      }
-      
-      if (state.cycleInProgress) {
-        console.log('⚠️ Cycle in progress, ignoring QR scan\n');
+      if (!state.isReady || !state.moduleId || state.cycleInProgress) {
+        console.log('❌ System not ready\n');
         return;
       }
       
       if (state.autoCycleEnabled) {
-        console.log('⚠️ System already active, forcing cleanup...\n');
         state.autoCycleEnabled = false;
         state.awaitingDetection = false;
         if (state.autoPhotoTimer) {
@@ -1036,28 +1372,24 @@ mqttClient.on('message', async (topic, message) => {
         await delay(500);
       }
       
-      console.log('✅ All validations passed - starting member session\n');
       await startSession(true, payload);
       return;
     }
     
     if (topic === CONFIG.mqtt.topics.guestStart) {
-      console.log('\n========================================');
-      console.log('🎫 GUEST SESSION START RECEIVED');
-      console.log('========================================\n');
+      console.log('\n🎫 GUEST START RECEIVED\n');
       
       if (!state.isReady || state.cycleInProgress || state.autoCycleEnabled) {
-        console.log('❌ SYSTEM NOT READY - Rejecting guest start\n');
+        console.log('❌ System not ready\n');
         return;
       }
       
-      console.log('✅ All validations passed - starting guest session\n');
       await startSession(false, payload);
       return;
     }
     
     if (topic === CONFIG.mqtt.topics.screenState) {
-      console.log(`📺 Screen update: ${payload.state}`);
+      console.log(`📺 Screen: ${payload.state}`);
       return;
     }
     
@@ -1077,11 +1409,10 @@ mqttClient.on('message', async (topic, message) => {
       console.log(`📩 Command: ${payload.action}`);
       
       if (payload.action === 'emergencyStop') {
-        console.log('🚨 EMERGENCY STOP');
+        console.log('🚨 EMERGENCY STOP\n');
         await executeCommand('closeGate');
         await executeCommand('customMotor', CONFIG.motors.belt.stop);
         
-        // Stop compactor immediately (emergency)
         if (state.compactorRunning) {
           await executeCommand('customMotor', CONFIG.motors.compactor.stop);
           if (state.compactorTimer) {
@@ -1098,19 +1429,14 @@ mqttClient.on('message', async (topic, message) => {
       }
       
       if (payload.action === 'forceReset') {
-        console.log('🚨 FORCE RESET - Emergency state cleanup\n');
+        console.log('🚨 FORCE RESET\n');
         state.cycleInProgress = false;
-        // Force stop everything including compactor
         await resetSystemForNextUser(true);
         return;
       }
       
       if (payload.action === 'endSession') {
-        console.log('🏁 SESSION END COMMAND - Waiting for last bottle to complete');
-        if (state.cycleInProgress) {
-          console.log('⚠️ Session end requested during active cycle - will wait for completion\n');
-        }
-        // Normal end - wait for compactor to complete last bottle
+        console.log('🏁 SESSION END\n');
         await resetSystemForNextUser(false);
         return;
       }
@@ -1130,7 +1456,7 @@ mqttClient.on('message', async (topic, message) => {
       }
       
       if (payload.action === 'takePhoto' && state.moduleId) {
-        console.log('📸 MANUAL PHOTO!\n');
+        console.log('📸 MANUAL PHOTO\n');
         state.awaitingDetection = true;
         await executeCommand('takePhoto');
         return;
@@ -1142,7 +1468,7 @@ mqttClient.on('message', async (topic, message) => {
     }
     
   } catch (error) {
-    console.error('❌ MQTT error:', error.message);
+    logError('E301', { topic, error: error.message });
   }
 });
 
@@ -1157,16 +1483,19 @@ async function requestModuleId() {
     });
     console.log('📟 Module ID requested');
   } catch (error) {
-    console.error('❌ Module ID request failed:', error.message);
+    logError('E504', { error: error.message });
   }
 }
 
 function gracefulShutdown() {
-  console.log('\n⏹️ Shutting down...');
+  console.log('\n⏹️ Shutting down');
   
-  // Stop compactor if running
   if (state.compactorRunning && state.compactorTimer) {
     clearTimeout(state.compactorTimer);
+  }
+  
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
   }
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
@@ -1176,6 +1505,7 @@ function gracefulShutdown() {
   }), { retain: true });
   
   if (state.ws) state.ws.close();
+  if (db) db.close();
   mqttClient.end();
   
   process.exit(0);
@@ -1184,28 +1514,50 @@ function gracefulShutdown() {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
+// ============================================
+// STARTUP
+// ============================================
 console.log('========================================');
-console.log('🚀 RVM AGENT - OPTIMIZED MULTI-ITEM');
+console.log('🚀 RVM AGENT - PRODUCTION READY');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
-console.log('✅ Parallel Compactor: Next bottle ready immediately!');
-console.log('✅ Member: QR → Multiple items');
-console.log('✅ Guest: No QR → Multiple items');
-console.log('⚡ Time savings: ~20s per bottle');
+console.log('✅ Health Monitoring');
+console.log('✅ Error Code System');
+console.log('✅ Watchdog Timer');
+console.log('✅ Data Persistence (SQLite)');
+console.log('✅ Parallel Compactor');
 console.log('========================================');
-console.log('⏳ Starting...\n');
+console.log('⏳ Initializing...\n');
 
-setTimeout(() => {
-  if (state.moduleId) {
-    state.isReady = true;
-    console.log('🟢 SYSTEM READY\n');
+initDatabase()
+  .then(() => {
+    console.log('✅ All systems ready\n');
     
-    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
-      deviceId: CONFIG.device.id,
-      status: 'ready',
-      event: 'startup_ready',
-      isReady: true,
-      timestamp: new Date().toISOString()
-    }));
-  }
-}, 3000);
+    // Start watchdog after 5 seconds
+    setTimeout(() => {
+      startWatchdog();
+    }, 5000);
+    
+    // Start data sync (every 5 minutes)
+    setInterval(syncPendingData, 300000);
+    
+    // Mark as ready after module ID received
+    setTimeout(() => {
+      if (state.moduleId) {
+        state.isReady = true;
+        console.log('🟢 SYSTEM READY\n');
+        
+        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+          deviceId: CONFIG.device.id,
+          status: 'ready',
+          event: 'startup_ready',
+          isReady: true,
+          timestamp: new Date().toISOString()
+        }));
+      }
+    }, 3000);
+  })
+  .catch(err => {
+    console.error('❌ Initialization failed:', err);
+    process.exit(1);
+  });
