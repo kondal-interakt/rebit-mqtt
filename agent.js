@@ -1,4 +1,4 @@
-// agent.js - Fixed Multi-Item Flow (Proper Session Reset)
+// agent.js - Fixed Multi-Item Flow (Immediate Gate Closure on Session End)
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -574,7 +574,7 @@ async function startSession(isMember, sessionData) {
   }));
 }
 
-// 🔧 FIXED: Improved reset with better state tracking and retry logic
+// 🔧 FIXED: Gate closes immediately on session end
 async function resetSystemForNextUser(forceStop = false) {
   console.log('\n========================================');
   console.log('🔄 RESETTING SYSTEM FOR NEXT USER');
@@ -596,9 +596,31 @@ async function resetSystemForNextUser(forceStop = false) {
   
   state.resetting = true;
   
+  // 🆕 FIX: Close gate IMMEDIATELY - before any waiting
+  console.log('🚪 Closing gate immediately (session ended)...');
+  try {
+    await executeCommand('closeGate');
+    await delay(CONFIG.timing.gateOperation);
+    console.log('✅ Gate closed - no more items can be inserted\n');
+  } catch (error) {
+    console.error('❌ Gate closure error:', error.message);
+  }
+  
+  // Stop accepting new items immediately
+  console.log('🛑 Stopping auto cycle and timers...');
+  state.autoCycleEnabled = false;
+  state.awaitingDetection = false;
+  state.detectionRetries = 0;
+  
+  if (state.autoPhotoTimer) {
+    clearTimeout(state.autoPhotoTimer);
+    state.autoPhotoTimer = null;
+  }
+  console.log('✅ Auto operations stopped\n');
+  
   // 🔧 FIX 4: Wait for cycle completion with better retry logic
   if (state.cycleInProgress) {
-    console.log('⏳ Cycle in progress - waiting for completion before reset...');
+    console.log('⏳ Cycle in progress - waiting for completion before final cleanup...');
     const maxWait = 60000; // 60 seconds
     const startWait = Date.now();
     let attempts = 0;
@@ -618,17 +640,6 @@ async function resetSystemForNextUser(forceStop = false) {
     }
   }
   
-  console.log('🛑 Force stopping all operations...');
-  state.autoCycleEnabled = false;
-  state.awaitingDetection = false;
-  state.detectionRetries = 0;
-  
-  if (state.autoPhotoTimer) {
-    clearTimeout(state.autoPhotoTimer);
-    state.autoPhotoTimer = null;
-  }
-  console.log('✅ Operations stopped\n');
-  
   try {
     // 🔄 Handle compactor gracefully
     if (state.compactorRunning) {
@@ -645,6 +656,7 @@ async function resetSystemForNextUser(forceStop = false) {
       } else {
         // Normal session end: Wait for compactor to complete naturally
         console.log('⏳ Waiting for compactor to complete last bottle...');
+        console.log('💡 Gate is already closed - safely finishing last item\n');
         const maxWaitTime = CONFIG.timing.compactor + 2000; // Add 2s buffer
         const startWait = Date.now();
         
@@ -669,10 +681,11 @@ async function resetSystemForNextUser(forceStop = false) {
       }
     }
     
-    console.log('🚪 Closing gate...');
+    // Gate already closed above, but confirm it
+    console.log('🚪 Confirming gate is closed...');
     await executeCommand('closeGate');
     await delay(CONFIG.timing.gateOperation);
-    console.log('✅ Gate closed\n');
+    console.log('✅ Gate closure confirmed\n');
     
     console.log('🛑 Stopping all motors...');
     await executeCommand('customMotor', CONFIG.motors.belt.stop);
@@ -1227,11 +1240,11 @@ mqttClient.on('message', async (topic, message) => {
       }
       
       if (payload.action === 'endSession') {
-        console.log('🏁 SESSION END COMMAND - Waiting for last bottle to complete');
+        console.log('🏁 SESSION END COMMAND - Gate will close immediately');
         if (state.cycleInProgress) {
           console.log('⚠️ Session end requested during active cycle - will wait for completion\n');
         }
-        // Normal end - wait for compactor to complete last bottle
+        // Normal end - gate closes immediately, wait for compactor to complete last bottle
         await resetSystemForNextUser(false);
         return;
       }
@@ -1307,10 +1320,10 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 console.log('========================================');
-console.log('🚀 RVM AGENT - FIXED MULTI-ITEM FLOW');
+console.log('🚀 RVM AGENT - IMMEDIATE GATE CLOSURE');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
-console.log('✅ Fixed: Guest→Member session transitions');
+console.log('✅ Fixed: Gate closes immediately on session end');
 console.log('✅ Parallel Compactor: Next bottle ready immediately!');
 console.log('✅ Member: QR → Multiple items');
 console.log('✅ Guest: No QR → Multiple items');
