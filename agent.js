@@ -65,7 +65,7 @@ const CONFIG = {
     retryDelay: 2000,
     maxRetries: 3,
     hasObjectSensor: false,
-    minValidWeight: 5
+    minValidWeight: 1
   },
   
   timing: {
