@@ -1,4 +1,4 @@
-// agent-qr-serial.js - QR Reading via Serial/Keyboard Input (FIXED VERSION)
+// agent-qr-serial-fixed.js - IMPROVED QR Reading with Better Debugging
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -41,13 +41,14 @@ const CONFIG = {
   },
   
   qr: {
-    enabled: true,             // Enable QR scanning
-    minLength: 5,              // Minimum QR code length
-    maxLength: 50,             // Maximum QR code length
-    scanTimeout: 300,          // Time between key presses (ms)
-    serialPort: null,          // Optional: serial port for QR scanner
-    useKeyboard: true,         // Use keyboard input (like qr.html)
-    debug: true                // Enable debug logging
+    enabled: true,
+    minLength: 5,
+    maxLength: 50,
+    scanTimeout: 500,        // Increased from 300ms
+    serialPort: null,
+    useKeyboard: true,
+    debug: true,             // Keep debug ON for troubleshooting
+    testMode: false          // NEW: Enable test mode for manual testing
   },
   
   motors: {
@@ -109,19 +110,20 @@ const state = {
   ws: null,
   isReady: false,
   
-  // QR Scanner state (serial/keyboard input)
+  // QR Scanner state
   qrBuffer: '',
   lastKeyTime: 0,
   qrScanTimer: null,
   processingQR: false,
   qrScannerEnabled: false,
   stdinConfigured: false,
+  stdinListener: null,        // NEW: Track listener reference
   
   // Compactor tracking
   compactorRunning: false,
   compactorTimer: null,
   
-  // Session tracking (MEMBER ONLY)
+  // Session tracking
   sessionId: null,
   sessionCode: null,
   currentUserId: null,
@@ -135,12 +137,9 @@ const state = {
   maxDurationTimer: null,
   
   autoPhotoTimer: null,
-  
-  // Detection retry tracking
   detectionRetries: 0,
   maxDetectionRetries: 3,
   awaitingDetection: false,
-  
   resetting: false
 };
 
@@ -217,11 +216,11 @@ function determineMaterialType(aiData) {
 }
 
 // ============================================
-// QR CODE SCANNER (SERIAL/KEYBOARD INPUT)
+// QR CODE SCANNER (IMPROVED)
 // ============================================
 
 /**
- * Validate QR code with backend (MEMBER only)
+ * Validate QR code with backend
  */
 async function validateQRWithBackend(sessionCode) {
   try {
@@ -270,10 +269,8 @@ async function processQRCode(qrData) {
     return;
   }
   
-  // Clean the QR data
   const cleanCode = qrData.replace(/[\r\n\t]/g, '').trim();
   
-  // Validate format
   if (cleanCode.length < CONFIG.qr.minLength || cleanCode.length > CONFIG.qr.maxLength) {
     log(`Invalid QR code length: ${cleanCode.length} chars (expected: ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength})`, 'error');
     
@@ -296,7 +293,6 @@ async function processQRCode(qrData) {
   console.log(`Length: ${cleanCode.length} chars`);
   console.log('========================================\n');
   
-  // Show scanning status on monitor
   mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
     deviceId: CONFIG.device.id,
     state: 'qr_validating',
@@ -304,13 +300,11 @@ async function processQRCode(qrData) {
     timestamp: new Date().toISOString()
   }));
   
-  // Validate with backend
   const validation = await validateQRWithBackend(cleanCode);
   
   if (validation.valid) {
     log('QR CODE VALID - STARTING MEMBER SESSION', 'success');
     
-    // Show welcome on monitor
     mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
       deviceId: CONFIG.device.id,
       state: 'qr_validated',
@@ -319,17 +313,13 @@ async function processQRCode(qrData) {
       timestamp: new Date().toISOString()
     }));
     
-    // Wait a moment to show welcome screen
     await delay(2000);
-    
-    // Start member session
     await startMemberSession(validation);
     
   } else {
     log('QR CODE INVALID', 'error');
     log(`Error: ${validation.error}`, 'error');
     
-    // Show error on monitor
     mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
       deviceId: CONFIG.device.id,
       state: 'qr_invalid',
@@ -337,7 +327,6 @@ async function processQRCode(qrData) {
       timestamp: new Date().toISOString()
     }));
     
-    // Wait 3 seconds then show scan screen again
     await delay(3000);
     
     mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
@@ -352,7 +341,7 @@ async function processQRCode(qrData) {
 }
 
 /**
- * Handle keyboard/serial input for QR scanner
+ * IMPROVED: Handle keyboard/serial input for QR scanner
  */
 function setupQRScanner() {
   if (!CONFIG.qr.enabled || !CONFIG.qr.useKeyboard) {
@@ -371,174 +360,227 @@ function setupQRScanner() {
   console.log('Waiting for QR scanner input...');
   console.log('QR scanners work like keyboards');
   console.log('Press Ctrl+C to exit');
+  console.log('========================================');
+  console.log(`🔍 stdin.isTTY: ${process.stdin.isTTY}`);
+  console.log(`🔍 stdin.isRaw: ${process.stdin.isRaw}`);
+  console.log(`🔍 stdin.readable: ${process.stdin.readable}`);
+  console.log(`🔍 stdin.readableFlowing: ${process.stdin.readableFlowing}`);
   console.log('========================================\n');
   
   state.qrScannerEnabled = true;
   state.qrBuffer = '';
   state.lastKeyTime = Date.now();
   
-  // Configure stdin for input
+  // Configure stdin
   try {
-    // Set raw mode if TTY (for keyboard input)
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      debugLog('stdin set to raw mode');
+    // Check for existing listeners
+    const existingListeners = process.stdin.listenerCount('data');
+    if (existingListeners > 0) {
+      log(`⚠️ Found ${existingListeners} existing stdin listeners, removing...`, 'warning');
+      process.stdin.removeAllListeners('data');
     }
     
-    // Resume stdin to start receiving data
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    debugLog('stdin resumed and encoding set to utf8');
+    // IMPORTANT: Resume BEFORE setting raw mode
+    if (!process.stdin.readable) {
+      log('⚠️ stdin not readable!', 'error');
+    }
     
-    // Remove any existing listeners to avoid duplicates
-    process.stdin.removeAllListeners('data');
-    debugLog('Removed existing stdin listeners');
+    process.stdin.resume();
+    log('✅ stdin resumed', 'success');
+    
+    // Set encoding
+    process.stdin.setEncoding('utf8');
+    log('✅ stdin encoding set to utf8', 'success');
+    
+    // Set raw mode if TTY
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(true);
+        log('✅ stdin set to raw mode', 'success');
+      } catch (rawModeError) {
+        log(`⚠️ Could not set raw mode: ${rawModeError.message}`, 'warning');
+        log('Continuing without raw mode (OK for QR scanners)', 'info');
+      }
+    } else {
+      log('ℹ️ stdin is not a TTY (OK for QR scanners)', 'info');
+    }
     
     state.stdinConfigured = true;
+    log('✅ stdin configuration complete', 'success');
     
   } catch (error) {
-    log(`Failed to configure stdin: ${error.message}`, 'error');
+    log(`❌ Failed to configure stdin: ${error.message}`, 'error');
+    console.error(error.stack);
     return;
   }
   
-  // Single data handler for all input
-  process.stdin.on('data', (chunk) => {
-    try {
-      // Handle Ctrl+C for exit
-      if (chunk === '\u0003') {
-        log('Ctrl+C detected, shutting down...', 'info');
-        gracefulShutdown();
-        return;
-      }
-      
-      debugLog(`Received data: ${JSON.stringify(chunk)} (${chunk.length} bytes)`);
-      
-      if (!state.qrScannerEnabled) {
-        debugLog('QR scanner disabled, ignoring input');
-        return;
-      }
-      
-      if (state.processingQR) {
-        debugLog('Already processing QR, ignoring input');
-        return;
-      }
-      
-      if (!state.isReady) {
-        log('System not ready for QR scan', 'warning');
-        return;
-      }
-      
-      if (state.autoCycleEnabled) {
-        log('Session already active, ignoring QR scan', 'warning');
-        return;
-      }
-      
-      const currentTime = Date.now();
-      const timeDiff = currentTime - state.lastKeyTime;
-      
-      // Reset buffer if gap is too large (new scan starting)
-      if (timeDiff > CONFIG.qr.scanTimeout) {
-        if (state.qrBuffer.length > 0) {
-          debugLog(`Buffer reset due to timeout (${timeDiff}ms gap)`);
-        }
-        state.qrBuffer = '';
-      }
-      
-      state.lastKeyTime = currentTime;
-      
-      // Process each character in the chunk
-      for (let i = 0; i < chunk.length; i++) {
-        const char = chunk[i];
-        
-        // Check for Enter/Return (QR scanner completion)
-        if (char === '\n' || char === '\r') {
-          debugLog('Enter/Return detected');
-          
-          if (state.qrBuffer.length >= CONFIG.qr.minLength) {
-            const qrCode = state.qrBuffer.trim();
-            log(`QR Code Complete: ${qrCode} (${qrCode.length} chars)`, 'success');
-            state.qrBuffer = '';
-            
-            // Clear any pending timer
-            if (state.qrScanTimer) {
-              clearTimeout(state.qrScanTimer);
-              state.qrScanTimer = null;
-            }
-            
-            // Process the QR code
-            processQRCode(qrCode);
-            return; // Exit to prevent further processing
-            
-          } else if (state.qrBuffer.length > 0) {
-            log(`QR too short: ${state.qrBuffer.length} chars (min: ${CONFIG.qr.minLength})`, 'warning');
-            state.qrBuffer = '';
-          }
-        } 
-        // Accept printable ASCII characters and common symbols
-        else if (char >= ' ' && char <= '~') {
-          state.qrBuffer += char;
-          
-          // Show progress for debugging (first character)
-          if (state.qrBuffer.length === 1) {
-            process.stdout.write('📱 Scanning');
-          }
-          // Show dots for progress
-          if (state.qrBuffer.length % 5 === 0) {
-            process.stdout.write('.');
-          }
-          
-          debugLog(`Buffer: "${state.qrBuffer}" (${state.qrBuffer.length} chars)`);
-          
-          // Auto-process if buffer reaches max length
-          if (state.qrBuffer.length >= CONFIG.qr.maxLength) {
-            const qrCode = state.qrBuffer.trim();
-            log(`\nQR Code Max Length Reached: ${qrCode}`, 'success');
-            state.qrBuffer = '';
-            
-            // Clear any pending timer
-            if (state.qrScanTimer) {
-              clearTimeout(state.qrScanTimer);
-              state.qrScanTimer = null;
-            }
-            
-            processQRCode(qrCode);
-            return; // Exit to prevent further processing
-          }
-        }
-        else {
-          debugLog(`Ignoring non-printable character: ${char.charCodeAt(0)}`);
-        }
-      }
-      
-      // Clear existing timer
-      if (state.qrScanTimer) {
-        clearTimeout(state.qrScanTimer);
-      }
-      
-      // Set timeout timer for incomplete scan
-      if (state.qrBuffer.length > 0) {
-        state.qrScanTimer = setTimeout(() => {
-          if (state.qrBuffer.length >= CONFIG.qr.minLength) {
-            const qrCode = state.qrBuffer.trim();
-            log(`\nQR Timeout Complete: ${qrCode}`, 'success');
-            state.qrBuffer = '';
-            processQRCode(qrCode);
-          } else {
-            log(`\nIncomplete scan cleared: "${state.qrBuffer}" (${state.qrBuffer.length} chars)`, 'warning');
-            state.qrBuffer = '';
-          }
-          state.qrScanTimer = null;
-        }, CONFIG.qr.scanTimeout);
-      }
-      
-    } catch (error) {
-      log(`Error in QR scanner: ${error.message}`, 'error');
-      console.error(error);
-    }
-  });
+  // Create and attach the data handler
+  state.stdinListener = (chunk) => handleStdinData(chunk);
+  process.stdin.on('data', state.stdinListener);
   
-  log('QR Scanner active - ready for input', 'success');
-  console.log('💡 Test by typing a code (min 5 chars) and pressing Enter\n');
+  log('✅ QR Scanner active - ready for input', 'success');
+  
+  // Test prompt
+  if (CONFIG.qr.testMode) {
+    console.log('\n💡 TEST MODE: Type a code (min 5 chars) and press Enter');
+    console.log('💡 Or paste a QR code value\n');
+  }
+  
+  // Log stdin status
+  console.log(`📊 stdin status:`);
+  console.log(`   - readableFlowing: ${process.stdin.readableFlowing}`);
+  console.log(`   - data listeners: ${process.stdin.listenerCount('data')}`);
+  console.log(`   - readable: ${process.stdin.readable}`);
+  console.log('');
+}
+
+/**
+ * NEW: Separate handler for stdin data
+ */
+function handleStdinData(chunk) {
+  try {
+    // Handle Ctrl+C
+    if (chunk === '\u0003') {
+      log('Ctrl+C detected, shutting down...', 'info');
+      gracefulShutdown();
+      return;
+    }
+    
+    // Debug raw input
+    debugLog(`Raw input: ${JSON.stringify(chunk)} (${chunk.length} bytes)`);
+    
+    // Check if scanner is enabled
+    if (!state.qrScannerEnabled) {
+      debugLog('QR scanner disabled, ignoring input');
+      return;
+    }
+    
+    if (state.processingQR) {
+      debugLog('Already processing QR, ignoring input');
+      return;
+    }
+    
+    if (!state.isReady) {
+      log('System not ready for QR scan', 'warning');
+      return;
+    }
+    
+    if (state.autoCycleEnabled) {
+      log('Session already active, ignoring QR scan', 'warning');
+      return;
+    }
+    
+    const currentTime = Date.now();
+    const timeDiff = currentTime - state.lastKeyTime;
+    
+    // Reset buffer if timeout exceeded (new scan starting)
+    if (timeDiff > CONFIG.qr.scanTimeout) {
+      if (state.qrBuffer.length > 0) {
+        debugLog(`Buffer reset: timeout ${timeDiff}ms (had ${state.qrBuffer.length} chars)`);
+      }
+      state.qrBuffer = '';
+    }
+    
+    state.lastKeyTime = currentTime;
+    
+    // Process each character
+    for (let i = 0; i < chunk.length; i++) {
+      const char = chunk[i];
+      const charCode = char.charCodeAt(0);
+      
+      debugLog(`Processing char[${i}]: '${char}' (code: ${charCode})`);
+      
+      // Check for Enter/Return
+      if (char === '\n' || char === '\r') {
+        debugLog('Enter/Return detected');
+        
+        // Skip if we just processed an Enter (handles \r\n)
+        if (state.qrBuffer === '' && i === 0) {
+          debugLog('Empty buffer with Enter, skipping');
+          continue;
+        }
+        
+        if (state.qrBuffer.length >= CONFIG.qr.minLength) {
+          const qrCode = state.qrBuffer.trim();
+          log(`✅ QR Code Complete: "${qrCode}" (${qrCode.length} chars)`, 'success');
+          
+          // Clear buffer and timer
+          state.qrBuffer = '';
+          if (state.qrScanTimer) {
+            clearTimeout(state.qrScanTimer);
+            state.qrScanTimer = null;
+          }
+          
+          // Process the QR code
+          processQRCode(qrCode);
+          return;
+          
+        } else if (state.qrBuffer.length > 0) {
+          log(`⚠️ QR too short: ${state.qrBuffer.length} chars (min: ${CONFIG.qr.minLength})`, 'warning');
+          state.qrBuffer = '';
+        }
+      }
+      // Accept printable ASCII
+      else if (charCode >= 32 && charCode <= 126) {
+        state.qrBuffer += char;
+        
+        // Progress indicator
+        if (state.qrBuffer.length === 1) {
+          process.stdout.write('📱 Scanning');
+        }
+        if (state.qrBuffer.length % 5 === 0) {
+          process.stdout.write('.');
+        }
+        
+        debugLog(`Buffer now: "${state.qrBuffer}" (${state.qrBuffer.length} chars)`);
+        
+        // Auto-process if max length reached
+        if (state.qrBuffer.length >= CONFIG.qr.maxLength) {
+          const qrCode = state.qrBuffer.trim();
+          log(`\n✅ QR Max Length: "${qrCode}"`, 'success');
+          
+          state.qrBuffer = '';
+          if (state.qrScanTimer) {
+            clearTimeout(state.qrScanTimer);
+            state.qrScanTimer = null;
+          }
+          
+          processQRCode(qrCode);
+          return;
+        }
+      }
+      // Ignore non-printable
+      else {
+        debugLog(`Ignoring non-printable char: ${charCode}`);
+      }
+    }
+    
+    // Set/reset timeout timer
+    if (state.qrScanTimer) {
+      clearTimeout(state.qrScanTimer);
+    }
+    
+    if (state.qrBuffer.length > 0) {
+      state.qrScanTimer = setTimeout(() => {
+        if (state.qrBuffer.length >= CONFIG.qr.minLength) {
+          const qrCode = state.qrBuffer.trim();
+          log(`\n✅ QR Timeout Complete: "${qrCode}"`, 'success');
+          state.qrBuffer = '';
+          processQRCode(qrCode);
+        } else {
+          log(`\n⚠️ Incomplete scan cleared: "${state.qrBuffer}" (${state.qrBuffer.length} chars)`, 'warning');
+          state.qrBuffer = '';
+        }
+        state.qrScanTimer = null;
+      }, CONFIG.qr.scanTimeout);
+      
+      debugLog(`Timeout set for ${CONFIG.qr.scanTimeout}ms`);
+    }
+    
+  } catch (error) {
+    log(`❌ Error in QR scanner: ${error.message}`, 'error');
+    console.error(error.stack);
+  }
 }
 
 function stopQRScanner() {
@@ -552,11 +594,15 @@ function stopQRScanner() {
     state.qrScanTimer = null;
   }
   
-  // Remove stdin listeners
+  // Remove listener
+  if (state.stdinConfigured && state.stdinListener) {
+    process.stdin.removeListener('data', state.stdinListener);
+    state.stdinListener = null;
+    debugLog('Removed stdin data listener');
+  }
+  
+  // Restore normal mode
   if (state.stdinConfigured) {
-    process.stdin.removeAllListeners('data');
-    
-    // Restore normal mode if TTY
     if (process.stdin.isTTY && process.stdin.setRawMode) {
       try {
         process.stdin.setRawMode(false);
@@ -566,6 +612,14 @@ function stopQRScanner() {
       }
     }
     
+    // Pause stdin
+    try {
+      process.stdin.pause();
+      debugLog('stdin paused');
+    } catch (error) {
+      log(`Error pausing stdin: ${error.message}`, 'error');
+    }
+    
     state.stdinConfigured = false;
   }
   
@@ -573,7 +627,7 @@ function stopQRScanner() {
 }
 
 // ============================================
-// HARDWARE CONTROL
+// HARDWARE CONTROL (unchanged)
 // ============================================
 async function executeCommand(action, params = {}) {
   const deviceType = 1;
@@ -652,7 +706,7 @@ async function executeCommand(action, params = {}) {
 }
 
 // ============================================
-// COMPACTOR MANAGEMENT
+// COMPACTOR, SESSION, CYCLE LOGIC (unchanged)
 // ============================================
 async function startCompactor() {
   if (state.compactorRunning) {
@@ -689,9 +743,6 @@ async function startCompactor() {
   log(`Compactor running (${CONFIG.timing.compactor / 1000}s)`, 'info');
 }
 
-// ============================================
-// REJECTION HANDLING
-// ============================================
 async function executeRejectionCycle() {
   console.log('\n========================================');
   console.log('❌ REJECTION CYCLE');
@@ -739,9 +790,6 @@ async function executeRejectionCycle() {
   }
 }
 
-// ============================================
-// SESSION TIMEOUT HANDLING
-// ============================================
 async function handleSessionTimeout(reason) {
   console.log('\n========================================');
   console.log('⏱️ SESSION TIMEOUT');
@@ -815,9 +863,6 @@ function clearSessionTimers() {
   }
 }
 
-// ============================================
-// MEMBER SESSION MANAGEMENT
-// ============================================
 async function startMemberSession(validationData) {
   console.log('\n========================================');
   console.log('🎬 STARTING MEMBER SESSION');
@@ -867,7 +912,6 @@ async function startMemberSession(validationData) {
   await delay(CONFIG.timing.gateOperation);
   log('Gate opened', 'success');
   
-  // Show session active screen
   mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
     deviceId: CONFIG.device.id,
     state: 'session_active',
@@ -970,7 +1014,6 @@ async function resetSystemForNextUser(forceStop = false) {
     log(`Reset error: ${error.message}`, 'error');
   }
   
-  // Clear all state
   state.aiResult = null;
   state.weight = null;
   state.currentUserId = null;
@@ -1002,7 +1045,6 @@ async function resetSystemForNextUser(forceStop = false) {
     timestamp: new Date().toISOString()
   }));
   
-  // Show scan QR screen
   mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
     deviceId: CONFIG.device.id,
     state: 'ready_for_qr',
@@ -1010,16 +1052,12 @@ async function resetSystemForNextUser(forceStop = false) {
     timestamp: new Date().toISOString()
   }));
   
-  // Restart QR scanner
   if (CONFIG.qr.enabled) {
     setupQRScanner();
     log('QR Scanner ready for next member', 'success');
   }
 }
 
-// ============================================
-// AUTO CYCLE PROCESSING
-// ============================================
 async function executeAutoCycle() {
   if (!state.aiResult || !state.weight || state.weight.weight <= 1) {
     state.cycleInProgress = false;
@@ -1095,7 +1133,7 @@ async function executeAutoCycle() {
 }
 
 // ============================================
-// WEBSOCKET CONNECTION
+// WEBSOCKET & MQTT (unchanged)
 // ============================================
 function connectWebSocket() {
   log('Connecting to WebSocket...', 'info');
@@ -1216,9 +1254,6 @@ function connectWebSocket() {
   });
 }
 
-// ============================================
-// MQTT CONNECTION
-// ============================================
 const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
   username: CONFIG.mqtt.username,
   password: CONFIG.mqtt.password,
@@ -1319,14 +1354,6 @@ function gracefulShutdown() {
   
   stopQRScanner();
   
-  // Pause stdin to stop receiving input
-  try {
-    process.stdin.pause();
-    debugLog('stdin paused');
-  } catch (error) {
-    log(`Error pausing stdin: ${error.message}`, 'error');
-  }
-  
   if (state.compactorTimer) {
     clearTimeout(state.compactorTimer);
   }
@@ -1352,11 +1379,9 @@ function gracefulShutdown() {
   }, 1000);
 }
 
-// Handle shutdown signals
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
-// Handle uncaught errors
 process.on('uncaughtException', (error) => {
   log(`Uncaught exception: ${error.message}`, 'error');
   console.error(error);
@@ -1372,12 +1397,12 @@ process.on('unhandledRejection', (error) => {
 // STARTUP
 // ============================================
 console.log('========================================');
-console.log('🚀 RVM AGENT - QR SERIAL INPUT (FIXED)');
+console.log('🚀 RVM AGENT - QR SERIAL (FIXED v2)');
 console.log('========================================');
 console.log(`📱 Device: ${CONFIG.device.id}`);
-console.log('✅ Serial/Keyboard QR Scanner');
-console.log('✅ Member Sessions Only');
-console.log('✅ Multi-Item Support');
+console.log('✅ Improved Serial/Keyboard QR Scanner');
+console.log('✅ Better stdin handling');
+console.log('✅ Enhanced debugging');
 console.log(`🔍 Debug Mode: ${CONFIG.qr.debug ? 'ON' : 'OFF'}`);
 console.log('========================================\n');
 
