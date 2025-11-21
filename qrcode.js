@@ -1,4 +1,4 @@
-// agent-qr-simple-full.js - FIXED QR SCANNER (NO ENTER NEEDED)
+// agent-qr-simple-full.js - PROPERLY FIXED QR SCANNER
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -44,8 +44,8 @@ const CONFIG = {
     enabled: true,
     minLength: 5,
     maxLength: 50,
-    scanTimeout: 100, // Shorter timeout for faster detection
-    debug: true
+    scanTimeout: 150, // Increased slightly for reliability
+    debug: false  // ✅ DISABLE debug to reduce console noise
   },
   
   motors: {
@@ -207,7 +207,7 @@ function determineMaterialType(aiData) {
 }
 
 // ============================================
-// FIXED QR SCANNER - NO ENTER NEEDED
+// PROPERLY FIXED QR SCANNER
 // ============================================
 
 /**
@@ -256,22 +256,13 @@ async function validateQRWithBackend(sessionCode) {
  */
 async function processQRCode(qrData) {
   if (state.processingQR) {
-    log('Already processing a QR code', 'warning');
     return;
   }
   
   const cleanCode = qrData.replace(/[\r\n\t]/g, '').trim();
   
   if (cleanCode.length < CONFIG.qr.minLength || cleanCode.length > CONFIG.qr.maxLength) {
-    log(`Invalid QR code length: ${cleanCode.length} chars (expected: ${CONFIG.qr.minLength}-${CONFIG.qr.maxLength})`, 'error');
-    
-    mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
-      deviceId: CONFIG.device.id,
-      state: 'qr_invalid',
-      message: `Invalid QR code format (${cleanCode.length} chars)`,
-      timestamp: new Date().toISOString()
-    }));
-    
+    log(`Invalid QR code length: ${cleanCode.length} chars`, 'error');
     return;
   }
   
@@ -332,7 +323,7 @@ async function processQRCode(qrData) {
 }
 
 /**
- * FIXED: CHARACTER-BY-CHARACTER QR SCANNER WITH RAW MODE
+ * ✅ PROPERLY FIXED: QR Scanner with correct raw mode handling
  */
 function setupSimpleQRScanner() {
   if (!CONFIG.qr.enabled) {
@@ -341,11 +332,10 @@ function setupSimpleQRScanner() {
   }
   
   console.log('\n' + '='.repeat(50));
-  console.log('📱 FIXED QR SCANNER - RAW MODE');
+  console.log('📱 QR SCANNER - PROPERLY FIXED');
   console.log('='.repeat(50));
-  console.log('✅ Ready for QR scanner input...');
-  console.log('✅ NO MANUAL ENTER NEEDED!');
-  console.log('✅ Scanner auto-detects completion');
+  console.log('✅ No Enter key needed!');
+  console.log('✅ Auto-detects completion');
   console.log('Press Ctrl+C to exit');
   console.log('='.repeat(50) + '\n');
   
@@ -353,39 +343,33 @@ function setupSimpleQRScanner() {
   state.qrBuffer = '';
   state.lastCharTime = 0;
   
-  // ✅ ENABLE RAW MODE for immediate character capture
+  // ✅ Configure stdin for raw mode properly
+  process.stdin.setEncoding('utf8');
+  
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
   }
-  process.stdin.resume();
-  process.stdin.setEncoding('utf8');
   
-  // Listen for each character as it comes in
+  process.stdin.resume();
+  
+  // Remove any existing listeners to prevent duplicates
+  process.stdin.removeAllListeners('data');
+  
+  // ✅ Listen for raw input
   process.stdin.on('data', (chunk) => {
     if (!state.qrScannerActive) return;
     
     const currentTime = Date.now();
     const input = chunk.toString();
     
-    // Handle Ctrl+C gracefully
+    // Handle Ctrl+C
     if (input === '\u0003') {
       gracefulShutdown();
       return;
     }
     
-    // Check system state
-    if (!state.isReady) {
-      log('System not ready for QR scan', 'warning');
-      return;
-    }
-    
-    if (state.autoCycleEnabled) {
-      log('Session already active, ignoring QR scan', 'warning');
-      return;
-    }
-    
-    if (state.processingQR) {
-      log('Already processing QR code', 'warning');
+    // ✅ Skip if system not ready
+    if (!state.isReady || state.autoCycleEnabled || state.processingQR) {
       return;
     }
     
@@ -394,62 +378,71 @@ function setupSimpleQRScanner() {
       const char = input[i];
       const charCode = char.charCodeAt(0);
       
-      // Handle Enter key (some scanners send it)
+      // ✅ Handle Enter/Return (scanner might send it)
       if (charCode === 13 || charCode === 10) {
         if (state.qrBuffer.length >= CONFIG.qr.minLength) {
-          console.log(''); // New line
-          log(`QR detected (Enter): "${state.qrBuffer}"`, 'success');
-          processQRCode(state.qrBuffer);
+          const qrCode = state.qrBuffer;
           state.qrBuffer = '';
+          
+          if (state.qrTimer) {
+            clearTimeout(state.qrTimer);
+            state.qrTimer = null;
+          }
+          
+          log(`QR Code detected: ${qrCode}`, 'success');
+          processQRCode(qrCode);
         }
         continue;
       }
       
-      // Accept printable ASCII characters (space to ~)
-      if (charCode >= 32 && charCode <= 126) {
+      // ✅ Only accept alphanumeric and some special chars (QR codes)
+      // This prevents console output from being captured
+      if ((charCode >= 48 && charCode <= 57) ||  // 0-9
+          (charCode >= 65 && charCode <= 90) ||  // A-Z
+          (charCode >= 97 && charCode <= 122) || // a-z
+          charCode === 45 || charCode === 95) {  // - and _
+        
         const timeDiff = currentTime - state.lastCharTime;
         
-        // Reset buffer if too much time between characters (new scan started)
+        // Reset buffer if too much time between characters
         if (timeDiff > CONFIG.qr.scanTimeout && state.qrBuffer.length > 0) {
-          debugLog(`New scan detected (${timeDiff}ms gap) - resetting buffer`);
           state.qrBuffer = '';
         }
         
-        // Add character to buffer
         state.qrBuffer += char;
         state.lastCharTime = currentTime;
-        
-        // Show real-time feedback (optional - comment out if too noisy)
-        process.stdout.write(char);
         
         // Clear previous timer
         if (state.qrTimer) {
           clearTimeout(state.qrTimer);
         }
         
-        // Set timer to detect end of scan (auto-complete after timeout)
+        // ✅ Auto-complete after scan timeout
         state.qrTimer = setTimeout(() => {
-          if (state.qrBuffer.length >= CONFIG.qr.minLength) {
-            console.log(''); // New line
-            log(`QR auto-detected: "${state.qrBuffer}"`, 'success');
-            processQRCode(state.qrBuffer);
-          } else if (state.qrBuffer.length > 0) {
-            debugLog(`Discarded short scan: "${state.qrBuffer}" (${state.qrBuffer.length} chars)`);
+          if (state.qrBuffer.length >= CONFIG.qr.minLength && 
+              state.qrBuffer.length <= CONFIG.qr.maxLength) {
+            const qrCode = state.qrBuffer;
+            state.qrBuffer = '';
+            log(`QR Code auto-detected: ${qrCode}`, 'success');
+            processQRCode(qrCode);
+          } else {
+            state.qrBuffer = ''; // Discard invalid length
           }
-          state.qrBuffer = '';
           state.qrTimer = null;
         }, CONFIG.qr.scanTimeout);
       }
     }
   });
   
-  log('Simple QR Scanner ready - start scanning!', 'success');
+  log('QR Scanner ready!', 'success');
 }
 
 /**
- * Stop QR scanner and cleanup
+ * Stop QR scanner
  */
 function stopQRScanner() {
+  if (!state.qrScannerActive) return;
+  
   log('Stopping QR scanner...', 'info');
   state.qrScannerActive = false;
   state.processingQR = false;
@@ -460,10 +453,26 @@ function stopQRScanner() {
     state.qrTimer = null;
   }
   
-  // ✅ Disable raw mode when stopping scanner
-  if (process.stdin.isTTY && process.stdin.isRaw) {
-    process.stdin.setRawMode(false);
+  // Don't disable raw mode here - keep it for next session
+}
+
+/**
+ * ✅ Restart QR scanner
+ */
+function restartQRScanner() {
+  if (!CONFIG.qr.enabled) return;
+  
+  state.qrScannerActive = true;
+  state.processingQR = false;
+  state.qrBuffer = '';
+  state.lastCharTime = 0;
+  
+  if (state.qrTimer) {
+    clearTimeout(state.qrTimer);
+    state.qrTimer = null;
   }
+  
+  log('QR Scanner restarted - ready for next scan', 'success');
 }
 
 // ============================================
@@ -528,8 +537,6 @@ async function executeCommand(action, params = {}) {
       throw new Error(`Unknown action: ${action}`);
   }
   
-  debugLog(`Executing: ${action} ${JSON.stringify(apiPayload)}`);
-  
   try {
     await axios.post(apiUrl, apiPayload, {
       timeout: CONFIG.local.timeout,
@@ -564,7 +571,7 @@ async function startCompactor() {
     }
   }
   
-  log('Step 5: Starting Compactor (parallel)', 'info');
+  log('Starting Compactor', 'info');
   
   state.compactorRunning = true;
   await executeCommand('customMotor', CONFIG.motors.compactor.start);
@@ -579,8 +586,6 @@ async function startCompactor() {
     state.compactorRunning = false;
     state.compactorTimer = null;
   }, CONFIG.timing.compactor);
-  
-  log(`Compactor running (${CONFIG.timing.compactor / 1000}s)`, 'info');
 }
 
 async function executeRejectionCycle() {
@@ -613,6 +618,7 @@ async function executeRejectionCycle() {
   state.awaitingDetection = false;
   state.cycleInProgress = false;
 
+  // ✅ Only restart auto-photo if session is still active
   if (state.autoCycleEnabled) {
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
@@ -622,7 +628,7 @@ async function executeRejectionCycle() {
     }
     
     state.autoPhotoTimer = setTimeout(() => {
-      if (!state.cycleInProgress && !state.awaitingDetection) {
+      if (state.autoCycleEnabled && !state.cycleInProgress && !state.awaitingDetection) {
         state.awaitingDetection = true;
         executeCommand('takePhoto');
       }
@@ -687,6 +693,7 @@ async function executeAutoCycle() {
   state.detectionRetries = 0;
   state.awaitingDetection = false;
 
+  // ✅ Only restart auto-photo if session is still active
   if (state.autoCycleEnabled) {
     await executeCommand('openGate');
     await delay(CONFIG.timing.gateOperation);
@@ -696,7 +703,7 @@ async function executeAutoCycle() {
     }
     
     state.autoPhotoTimer = setTimeout(() => {
-      if (!state.cycleInProgress && !state.awaitingDetection) {
+      if (state.autoCycleEnabled && !state.cycleInProgress && !state.awaitingDetection) {
         state.awaitingDetection = true;
         executeCommand('takePhoto');
       }
@@ -772,8 +779,10 @@ async function startMemberSession(validationData) {
   }
   
   state.autoPhotoTimer = setTimeout(() => {
-    state.awaitingDetection = true;
-    executeCommand('takePhoto');
+    if (state.autoCycleEnabled) {
+      state.awaitingDetection = true;
+      executeCommand('takePhoto');
+    }
   }, CONFIG.timing.autoPhotoDelay);
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
@@ -801,6 +810,15 @@ async function resetSystemForNextUser(forceStop = false) {
   
   state.resetting = true;
   
+  // ✅ Stop auto-cycle IMMEDIATELY to prevent photo loop
+  state.autoCycleEnabled = false;
+  state.awaitingDetection = false;
+  
+  if (state.autoPhotoTimer) {
+    clearTimeout(state.autoPhotoTimer);
+    state.autoPhotoTimer = null;
+  }
+  
   if (state.cycleInProgress) {
     log('Waiting for cycle...', 'info');
     const maxWait = 60000;
@@ -809,14 +827,6 @@ async function resetSystemForNextUser(forceStop = false) {
     while (state.cycleInProgress && (Date.now() - startWait) < maxWait) {
       await delay(2000);
     }
-  }
-  
-  state.autoCycleEnabled = false;
-  state.awaitingDetection = false;
-  
-  if (state.autoPhotoTimer) {
-    clearTimeout(state.autoPhotoTimer);
-    state.autoPhotoTimer = null;
   }
   
   try {
@@ -866,12 +876,10 @@ async function resetSystemForNextUser(forceStop = false) {
   state.sessionId = null;
   state.sessionCode = null;
   state.calibrationAttempts = 0;
-  state.autoCycleEnabled = false;
   state.cycleInProgress = false;
   state.itemsProcessed = 0;
   state.sessionStartTime = null;
   state.detectionRetries = 0;
-  state.awaitingDetection = false;
   
   clearSessionTimers();
   
@@ -897,11 +905,8 @@ async function resetSystemForNextUser(forceStop = false) {
     timestamp: new Date().toISOString()
   }));
   
-  // Restart QR scanner for next user
-  if (CONFIG.qr.enabled) {
-    state.qrScannerActive = true;
-    log('QR Scanner ready for next member', 'success');
-  }
+  // ✅ Restart QR scanner for next user
+  restartQRScanner();
 }
 
 // ============================================
@@ -915,8 +920,10 @@ async function handleSessionTimeout(reason) {
   console.log(`Items processed: ${state.itemsProcessed}`);
   console.log('='.repeat(50) + '\n');
   
+  // ✅ Stop auto-cycle IMMEDIATELY
   state.autoCycleEnabled = false;
   state.awaitingDetection = false;
+  
   if (state.autoPhotoTimer) {
     clearTimeout(state.autoPhotoTimer);
     state.autoPhotoTimer = null;
@@ -1025,7 +1032,11 @@ function connectWebSocket() {
             state.detectionRetries++;
             
             if (state.detectionRetries < CONFIG.detection.maxRetries) {
-              setTimeout(() => executeCommand('takePhoto'), CONFIG.detection.retryDelay);
+              setTimeout(() => {
+                if (state.autoCycleEnabled) {
+                  executeCommand('takePhoto');
+                }
+              }, CONFIG.detection.retryDelay);
             } else {
               state.awaitingDetection = false;
               state.cycleInProgress = true;
@@ -1072,7 +1083,7 @@ function connectWebSocket() {
             }
             
             state.autoPhotoTimer = setTimeout(() => {
-              if (!state.cycleInProgress && !state.awaitingDetection) {
+              if (state.autoCycleEnabled && !state.cycleInProgress && !state.awaitingDetection) {
                 state.awaitingDetection = true;
                 executeCommand('takePhoto');
               }
@@ -1156,7 +1167,6 @@ mqttClient.on('message', async (topic, message) => {
       }
       
       if (payload.action === 'forceReset') {
-        stopQRScanner();
         state.cycleInProgress = false;
         state.resetting = false;
         await resetSystemForNextUser(true);
@@ -1164,7 +1174,6 @@ mqttClient.on('message', async (topic, message) => {
       }
       
       if (payload.action === 'endSession') {
-        stopQRScanner();
         await resetSystemForNextUser(false);
         return;
       }
@@ -1212,6 +1221,11 @@ function gracefulShutdown() {
   
   clearSessionTimers();
   
+  // ✅ Disable raw mode on shutdown
+  if (process.stdin.isTTY && process.stdin.isRaw) {
+    process.stdin.setRawMode(false);
+  }
+  
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
     status: 'offline',
@@ -1245,12 +1259,12 @@ process.on('unhandledRejection', (error) => {
 // STARTUP
 // ============================================
 console.log('='.repeat(50));
-console.log('🚀 RVM AGENT - FIXED QR SCANNER');
+console.log('🚀 RVM AGENT - PROPERLY FIXED QR SCANNER');
 console.log('='.repeat(50));
 console.log(`📱 Device: ${CONFIG.device.id}`);
-console.log('✅ RAW MODE - No Enter key needed!');
-console.log('✅ Character-by-character capture');
-console.log('✅ Auto-detection after scan complete');
+console.log('✅ No Enter key needed!');
+console.log('✅ Filters console output');
+console.log('✅ No infinite loops');
 console.log('='.repeat(50) + '\n');
 
 // Wait for module ID and start
@@ -1273,12 +1287,11 @@ setTimeout(() => {
       timestamp: new Date().toISOString()
     }));
     
-    // Start the FIXED QR scanner
+    // Start the PROPERLY FIXED QR scanner
     setupSimpleQRScanner();
     
     console.log('\n🟢 SYSTEM READY FOR QR SCANNING');
-    console.log('💡 Just scan QR codes - NO ENTER KEY NEEDED!');
-    console.log('🔍 Scanner will auto-detect completion\n');
+    console.log('💡 Scan QR codes - NO ENTER NEEDED!\n');
     
   } else {
     log('Module ID not received, retrying...', 'warning');
