@@ -1,8 +1,9 @@
-// agent-qr-auto-enter-full.js - AUTO-ENTER QR SCANNER (COMPLETE)
+// agent-qr-simple-full.js - SIMPLE WORKING QR SCANNER (COMPLETE)
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
 const WebSocket = require('ws');
+const readline = require('readline');
 
 // ============================================
 // CONFIGURATION
@@ -44,7 +45,7 @@ const CONFIG = {
     enabled: true,
     minLength: 5,
     maxLength: 50,
-    scanTimeout: 300, // Time between characters to detect end of scan
+    scanTimeout: 100, // Shorter timeout for faster detection
     debug: true
   },
   
@@ -207,7 +208,7 @@ function determineMaterialType(aiData) {
 }
 
 // ============================================
-// AUTO-ENTER QR SCANNER
+// SIMPLE WORKING QR SCANNER
 // ============================================
 
 /**
@@ -332,20 +333,20 @@ async function processQRCode(qrData) {
 }
 
 /**
- * AUTO-ENTER QR SCANNER - No manual Enter needed!
+ * SIMPLE CHARACTER-BY-CHARACTER QR SCANNER
  */
-function setupAutoEnterQRScanner() {
+function setupSimpleQRScanner() {
   if (!CONFIG.qr.enabled) {
     log('QR scanner disabled in config', 'warning');
     return;
   }
   
   console.log('\n' + '='.repeat(50));
-  console.log('📱 AUTO-ENTER QR SCANNER');
+  console.log('📱 SIMPLE QR SCANNER - CHARACTER MODE');
   console.log('='.repeat(50));
   console.log('Ready for QR scanner input...');
-  console.log('NO MANUAL ENTER NEEDED - just scan!');
-  console.log('Scanner will auto-detect when scan is complete');
+  console.log('NO MANUAL ENTER NEEDED!');
+  console.log('Scanner auto-detects completion');
   console.log('Press Ctrl+C to exit');
   console.log('='.repeat(50) + '\n');
   
@@ -353,25 +354,14 @@ function setupAutoEnterQRScanner() {
   state.qrBuffer = '';
   state.lastCharTime = 0;
   
-  // Configure stdin for raw character input
-  try {
-    process.stdin.setEncoding('utf8');
-    
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-    }
-    
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    
-    log('STDIN configured for raw character input', 'success');
-    
-  } catch (error) {
-    log(`STDIN configuration warning: ${error.message}`, 'warning');
-    log('Continuing with standard input mode...', 'info');
-  }
+  // Use readline in raw mode alternative
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false
+  });
   
-  // Handle each character input
+  // Listen for data events (character by character)
   process.stdin.on('data', (chunk) => {
     if (!state.qrScannerActive) return;
     
@@ -384,7 +374,7 @@ function setupAutoEnterQRScanner() {
       return;
     }
     
-    // Check if system is ready for QR scan
+    // Check system state
     if (!state.isReady) {
       log('System not ready for QR scan', 'warning');
       return;
@@ -405,25 +395,20 @@ function setupAutoEnterQRScanner() {
       const char = input[i];
       const charCode = char.charCodeAt(0);
       
-      // Accept printable ASCII characters (32-126)
+      // Accept printable ASCII characters
       if (charCode >= 32 && charCode <= 126) {
         const timeDiff = currentTime - state.lastCharTime;
         
-        // If time between characters is too long, reset buffer (new scan)
+        // Reset buffer if too much time between characters
         if (timeDiff > CONFIG.qr.scanTimeout && state.qrBuffer.length > 0) {
-          debugLog(`Buffer reset - time gap: ${timeDiff}ms`);
+          debugLog(`New scan detected - resetting buffer`);
           state.qrBuffer = '';
         }
         
         state.qrBuffer += char;
         state.lastCharTime = currentTime;
         
-        debugLog(`Char: '${char}' | Buffer: "${state.qrBuffer}" (${state.qrBuffer.length} chars)`);
-        
-        // Show scanning progress
-        if (state.qrBuffer.length === 1) {
-          process.stdout.write('🔍 Scanning: ');
-        }
+        // Show real-time feedback
         process.stdout.write(char);
         
         // Clear previous timer
@@ -434,39 +419,29 @@ function setupAutoEnterQRScanner() {
         // Set timer to detect end of scan
         state.qrTimer = setTimeout(() => {
           if (state.qrBuffer.length >= CONFIG.qr.minLength) {
-            console.log(''); // New line after scan complete
-            log(`QR Scan Complete: "${state.qrBuffer}"`, 'success');
-            processQRCode(state.qrBuffer);
-          } else if (state.qrBuffer.length > 0) {
             console.log(''); // New line
-            log(`Incomplete scan discarded: "${state.qrBuffer}"`, 'warning');
+            log(`Auto-detected QR: "${state.qrBuffer}"`, 'success');
+            processQRCode(state.qrBuffer);
           }
           state.qrBuffer = '';
           state.qrTimer = null;
         }, CONFIG.qr.scanTimeout);
-        
-      } else if (char === '\r' || char === '\n') {
-        // Handle Enter key if scanner sends it
-        if (state.qrBuffer.length >= CONFIG.qr.minLength) {
-          console.log(''); // New line
-          log(`QR Scan Complete (Enter): "${state.qrBuffer}"`, 'success');
-          processQRCode(state.qrBuffer);
-          state.qrBuffer = '';
-          if (state.qrTimer) {
-            clearTimeout(state.qrTimer);
-            state.qrTimer = null;
-          }
-        }
       }
-      // Ignore other non-printable characters
     }
   });
   
-  process.stdin.on('error', (error) => {
-    log(`STDIN error: ${error.message}`, 'error');
+  // Also handle line input for scanners that send Enter
+  rl.on('line', (input) => {
+    if (!state.qrScannerActive) return;
+    
+    const qrCode = input.trim();
+    if (qrCode && qrCode.length >= CONFIG.qr.minLength) {
+      console.log(`📱 QR Code (Enter): ${qrCode}`);
+      processQRCode(qrCode);
+    }
   });
   
-  log('Auto-enter QR Scanner ready - just scan, no Enter needed!', 'success');
+  log('Simple QR Scanner ready - start scanning!', 'success');
 }
 
 /**
@@ -481,15 +456,6 @@ function stopQRScanner() {
   if (state.qrTimer) {
     clearTimeout(state.qrTimer);
     state.qrTimer = null;
-  }
-  
-  try {
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(false);
-    }
-    process.stdin.pause();
-  } catch (error) {
-    // Ignore errors during cleanup
   }
 }
 
@@ -1272,10 +1238,10 @@ process.on('unhandledRejection', (error) => {
 // STARTUP
 // ============================================
 console.log('='.repeat(50));
-console.log('🚀 RVM AGENT - AUTO-ENTER QR SCANNER (COMPLETE)');
+console.log('🚀 RVM AGENT - SIMPLE WORKING QR SCANNER (COMPLETE)');
 console.log('='.repeat(50));
 console.log(`📱 Device: ${CONFIG.device.id}`);
-console.log('🔍 Auto-enter QR detection');
+console.log('🔍 Simple character-by-character scanner');
 console.log('⏱️ No manual Enter needed!');
 console.log('✅ All functions included');
 console.log('='.repeat(50) + '\n');
@@ -1300,12 +1266,12 @@ setTimeout(() => {
       timestamp: new Date().toISOString()
     }));
     
-    // Start the auto-enter QR scanner
-    setupAutoEnterQRScanner();
+    // Start the simple QR scanner
+    setupSimpleQRScanner();
     
     console.log('\n🟢 SYSTEM READY FOR QR SCANNING');
     console.log('💡 Just scan QR codes - NO ENTER KEY NEEDED!');
-    console.log('⏱️ Scanner auto-detects when scan is complete\n');
+    console.log('🔍 Scanner will auto-detect completion\n');
     
   } else {
     log('Module ID not received, retrying...', 'warning');
