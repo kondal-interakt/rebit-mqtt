@@ -525,10 +525,10 @@ function stopQRScanner() {
   }
   
   // ✅ Stop global keyboard listener
-  if (state.globalKeyListener) {
-    state.globalKeyListener.kill();
-    state.globalKeyListener = null;
-  }
+  // if (state.globalKeyListener) {
+  //   state.globalKeyListener.kill();
+  //   state.globalKeyListener = null;
+  // }
   
   debugLog('QR scanner stopped');
 }
