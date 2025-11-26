@@ -1,4 +1,4 @@
-// agent-qr-final.js - QR SCANNER + MQTT HEARTBEAT (PRODUCTION READY)
+// agent-qr-global.js - QR SCANNER WITH GLOBAL KEYBOARD HOOK + GUEST SUPPORT
 const mqtt = require('mqtt');
 const axios = require('axios');
 const fs = require('fs');
@@ -92,12 +92,6 @@ const CONFIG = {
     sessionMaxDuration: 600000
   },
   
-  // MQTT-based heartbeat configuration
-  heartbeat: {
-    interval: 30, // seconds
-    maxModuleIdRetries: 10
-  },
-  
   weight: {
     coefficients: { 1: 988, 2: 942, 3: 942, 4: 942 }
   }
@@ -171,132 +165,11 @@ function debugLog(message) {
 }
 
 // ============================================
-// MQTT-BASED HEARTBEAT MANAGEMENT
-// ============================================
-const heartbeat = {
-  interval: null,
-  timeout: CONFIG.heartbeat.interval,
-  moduleIdRetries: 0,
-  maxModuleIdRetries: CONFIG.heartbeat.maxModuleIdRetries,
-  
-  start() {
-    if (this.interval) {
-      clearInterval(this.interval);
-    }
-    
-    console.log(`💓 Starting heartbeat (every ${this.timeout}s)`);
-    
-    this.interval = setInterval(async () => {
-      await this.beat();
-    }, this.timeout * 1000);
-  },
-  
-  stop() {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-      console.log('💓 Heartbeat stopped');
-    }
-  },
-  
-  async beat() {
-    const timestamp = new Date().toISOString();
-    
-    // Check module ID
-    if (!state.moduleId && this.moduleIdRetries < this.maxModuleIdRetries) {
-      this.moduleIdRetries++;
-      console.log(`💓 Heartbeat: Module ID missing (retry ${this.moduleIdRetries}/${this.maxModuleIdRetries})`);
-      await requestModuleId();
-      await delay(1000);
-      
-      if (state.moduleId) {
-        console.log(`✅ Module ID acquired via heartbeat: ${state.moduleId}`);
-        this.moduleIdRetries = 0;
-        
-        // Set ready state when module ID is acquired
-        if (!state.isReady) {
-          state.isReady = true;
-          log('========================================');
-          log('🟢 SYSTEM READY');
-          log('========================================');
-          log(`📱 Module ID: ${state.moduleId}`);
-          log('✅ Ready for QR scan or guest session');
-          log('========================================\n');
-          
-          // Initialize QR scanner
-          setupSimpleQRScanner();
-          
-          mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
-            deviceId: CONFIG.device.id,
-            status: 'ready',
-            event: 'module_id_acquired',
-            moduleId: state.moduleId,
-            isReady: true,
-            timestamp
-          }));
-          
-          mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
-            deviceId: CONFIG.device.id,
-            state: 'ready_for_qr',
-            message: 'Please scan your QR code or click Start Recycling',
-            timestamp: new Date().toISOString()
-          }));
-        }
-      }
-    }
-    
-    // WebSocket health check
-    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-      console.log('⚠️ Heartbeat: WebSocket disconnected, reconnecting...');
-      connectWebSocket();
-    }
-    
-    // Publish status heartbeat
-    const heartbeatData = {
-      deviceId: CONFIG.device.id,
-      status: state.isReady ? 'ready' : 'initializing',
-      event: 'heartbeat',
-      moduleId: state.moduleId || null,
-      isReady: state.isReady,
-      resetting: state.resetting,
-      cycleInProgress: state.cycleInProgress,
-      autoCycleEnabled: state.autoCycleEnabled,
-      compactorRunning: state.compactorRunning,
-      itemsProcessed: state.itemsProcessed,
-      sessionActive: state.autoCycleEnabled,
-      sessionType: state.isMember ? 'member' : (state.isGuestSession ? 'guest' : null),
-      qrScannerActive: state.qrScannerActive,
-      uptime: Math.floor(process.uptime()),
-      timestamp
-    };
-    
-    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify(heartbeatData));
-    
-    console.log(`💓 Heartbeat: ${state.isReady ? '🟢 READY' : '🟡 INIT'} | Module: ${state.moduleId || 'NONE'} | Session: ${state.autoCycleEnabled ? 'ACTIVE' : 'IDLE'} | QR: ${state.qrScannerActive ? 'ON' : 'OFF'}`);
-  }
-};
-
-// ============================================
-// MODULE ID ACQUISITION
-// ============================================
-async function requestModuleId() {
-  try {
-    await axios.post(`${CONFIG.local.baseUrl}/system/serial/getModuleId`, {}, {
-      timeout: 5000,
-      headers: { 'Content-Type': 'application/json' }
-    });
-    console.log('📟 Module ID requested');
-  } catch (error) {
-    console.error('❌ Module ID request failed:', error.message);
-  }
-}
-
-// ============================================
 // DIAGNOSTIC FUNCTIONS
 // ============================================
 function runDiagnostics() {
   console.log('\n' + '='.repeat(60));
-  console.log('🔬 QR SCANNER & CONNECTION DIAGNOSTICS');
+  console.log('🔬 QR SCANNER DIAGNOSTICS');
   console.log('='.repeat(60));
   
   console.log('\n1️⃣ Configuration:');
@@ -306,31 +179,19 @@ function runDiagnostics() {
   console.log(`   Scan Timeout: ${CONFIG.qr.scanTimeout}ms`);
   console.log(`   Debug Mode: ${CONFIG.qr.debug}`);
   
-  console.log('\n2️⃣ WebSocket Status:');
-  console.log(`   Connected: ${state.ws ? (state.ws.readyState === WebSocket.OPEN) : false}`);
-  console.log(`   Ready State: ${state.ws ? state.ws.readyState : 'N/A'}`);
-  
-  console.log('\n3️⃣ Module ID Status:');
-  console.log(`   Module ID: ${state.moduleId || 'NOT SET'}`);
-  console.log(`   Heartbeat Retries: ${heartbeat.moduleIdRetries}/${heartbeat.maxModuleIdRetries}`);
-  
-  console.log('\n4️⃣ System State:');
+  console.log('\n2️⃣ State:');
   console.log(`   isReady: ${state.isReady}`);
   console.log(`   qrScannerActive: ${state.qrScannerActive}`);
   console.log(`   autoCycleEnabled: ${state.autoCycleEnabled}`);
   console.log(`   processingQR: ${state.processingQR}`);
+  console.log(`   moduleId: ${state.moduleId || 'NOT SET'}`);
   console.log(`   globalKeyListener: ${state.globalKeyListener ? 'ACTIVE' : 'INACTIVE'}`);
   
-  console.log('\n5️⃣ QR Buffer:');
+  console.log('\n3️⃣ Buffer:');
   console.log(`   Current buffer: "${state.qrBuffer}"`);
   console.log(`   Buffer length: ${state.qrBuffer.length}`);
   console.log(`   Last char time: ${state.lastCharTime}`);
   console.log(`   QR timer active: ${state.qrTimer !== null}`);
-  
-  console.log('\n6️⃣ Heartbeat Status:');
-  console.log(`   Interval: ${CONFIG.heartbeat.interval}s`);
-  console.log(`   Active: ${heartbeat.interval !== null}`);
-  console.log(`   Module ID Retries: ${heartbeat.moduleIdRetries}`);
   
   console.log('\n' + '='.repeat(60));
   console.log('💡 TIP: Try scanning a QR code now...');
@@ -509,12 +370,6 @@ async function processQRCode(qrData) {
 function setupSimpleQRScanner() {
   if (!CONFIG.qr.enabled) {
     log('QR scanner disabled in config', 'warning');
-    return;
-  }
-  
-  // Prevent multiple scanners
-  if (state.globalKeyListener) {
-    log('QR scanner already active', 'warning');
     return;
   }
   
@@ -1199,44 +1054,6 @@ async function resetSystemForNextUser(forceStop = false) {
 // ============================================
 
 
-// async function handleSessionTimeout(reason) {
-//   console.log('\n' + '='.repeat(50));
-//   console.log('⏱️ SESSION TIMEOUT');
-//   console.log('='.repeat(50));
-//   console.log(`Reason: ${reason}`);
-//   console.log(`Items processed: ${state.itemsProcessed}`);
-//   console.log('='.repeat(50) + '\n');
-  
-//   state.autoCycleEnabled = false;
-//   state.awaitingDetection = false;
-  
-//   if (state.autoPhotoTimer) {
-//     clearTimeout(state.autoPhotoTimer);
-//     state.autoPhotoTimer = null;
-//   }
-  
-//   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
-//     deviceId: CONFIG.device.id,
-//     status: 'timeout',
-//     event: 'session_timeout',
-//     reason: reason,
-//     itemsProcessed: state.itemsProcessed,
-//     timestamp: new Date().toISOString()
-//   }));
-  
-//   if (state.cycleInProgress) {
-//     log('Waiting for current cycle...', 'info');
-//     const maxWait = 60000;
-//     const startWait = Date.now();
-    
-//     while (state.cycleInProgress && (Date.now() - startWait) < maxWait) {
-//       await delay(1000);
-//     }
-//   }
-  
-//   await resetSystemForNextUser(false);
-// }
-
 async function handleSessionTimeout(reason) {
   console.log('\n' + '='.repeat(50));
   console.log('⏱️ SESSION TIMEOUT');
@@ -1296,7 +1113,6 @@ async function handleSessionTimeout(reason) {
   
   await resetSystemForNextUser(false);
 }
-
 function resetInactivityTimer() {
   if (state.sessionTimeoutTimer) {
     clearTimeout(state.sessionTimeoutTimer);
@@ -1337,89 +1153,24 @@ function clearSessionTimers() {
 // MQTT & WEBSOCKET
 // ============================================
 function connectWebSocket() {
-  log('🔌 Connecting to WebSocket...', 'info');
-  
-  // Clean up existing connection
-  if (state.ws) {
-    try {
-      state.ws.removeAllListeners();
-      state.ws.close();
-    } catch (e) {
-      // Ignore
-    }
-    state.ws = null;
-  }
+  log('Connecting to WebSocket...', 'info');
   
   state.ws = new WebSocket(CONFIG.local.wsUrl);
   
   state.ws.on('open', () => {
-    log('✅ WebSocket connected', 'success');
-    
-    // Request module ID if not set
-    if (!state.moduleId) {
-      setTimeout(() => {
-        requestModuleId();
-      }, 1000);
-    }
+    log('WebSocket connected', 'success');
   });
   
   state.ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data.toString());
       
-      // Module ID response
       if (message.function === '01') {
-        const newModuleId = message.moduleId;
-        
-        if (state.moduleId && state.moduleId !== newModuleId) {
-          log(`⚠️ Module ID changed: ${state.moduleId} → ${newModuleId}`, 'warning');
-        }
-        
-        state.moduleId = newModuleId;
-        log(`✅ Module ID: ${state.moduleId}`, 'success');
-        
-        // Reset heartbeat retry counter
-        heartbeat.moduleIdRetries = 0;
-        
-        // Set ready state and initialize when module ID is received
-        if (!state.isReady) {
-          state.isReady = true;
-          log('========================================');
-          log('🟢 SYSTEM READY');
-          log('========================================');
-          log(`📱 Module ID: ${state.moduleId}`);
-          log('✅ Ready for QR scan or guest session');
-          log('========================================\n');
-          
-          // Initialize QR scanner
-          setupSimpleQRScanner();
-          
-          mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
-            deviceId: CONFIG.device.id,
-            status: 'ready',
-            event: 'module_id_acquired',
-            moduleId: state.moduleId,
-            isReady: true,
-            timestamp: new Date().toISOString()
-          }));
-          
-          mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
-            deviceId: CONFIG.device.id,
-            state: 'ready_for_qr',
-            message: 'Please scan your QR code or click Start Recycling',
-            timestamp: new Date().toISOString()
-          }));
-          
-          // Run diagnostics after initialization
-          setTimeout(() => {
-            runDiagnostics();
-          }, 2000);
-        }
-        
+        state.moduleId = message.moduleId;
+        log(`Module ID: ${state.moduleId}`, 'success');
         return;
       }
       
-      // AI Photo result
       if (message.function === 'aiPhoto') {
         const aiData = JSON.parse(message.data);
         const materialType = determineMaterialType(aiData);
@@ -1458,7 +1209,6 @@ function connectWebSocket() {
         return;
       }
       
-      // Weight result
       if (message.function === '06') {
         const weightValue = parseFloat(message.data) || 0;
         const coefficient = CONFIG.weight.coefficients[1];
@@ -1511,21 +1261,17 @@ function connectWebSocket() {
       }
       
     } catch (error) {
-      log(`WS message error: ${error.message}`, 'error');
+      log(`WS error: ${error.message}`, 'error');
     }
   });
   
   state.ws.on('error', (error) => {
-    log(`❌ WS connection error: ${error.message}`, 'error');
+    log(`WS connection error: ${error.message}`, 'error');
   });
   
-  state.ws.on('close', (code, reason) => {
-    log(`⚠️ WS closed (code: ${code}, reason: ${reason || 'none'})`, 'warning');
-    
-    setTimeout(() => {
-      log('Reconnecting WebSocket...', 'info');
-      connectWebSocket();
-    }, 5000);
+  state.ws.on('close', () => {
+    log('WS closed, reconnecting in 5s...', 'warning');
+    setTimeout(connectWebSocket, 5000);
   });
 }
 
@@ -1537,7 +1283,7 @@ const mqttClient = mqtt.connect(CONFIG.mqtt.brokerUrl, {
 });
 
 mqttClient.on('connect', () => {
-  log('✅ MQTT connected', 'success');
+  log('MQTT connected', 'success');
   
   mqttClient.subscribe(CONFIG.mqtt.topics.commands);
   mqttClient.subscribe(CONFIG.mqtt.topics.qrInput);
@@ -1549,18 +1295,11 @@ mqttClient.on('connect', () => {
     timestamp: new Date().toISOString()
   }), { retain: true });
   
-  // Connect WebSocket
   connectWebSocket();
   
-  // Initial module ID request
   setTimeout(() => {
     requestModuleId();
   }, 2000);
-  
-  // START HEARTBEAT (after 5 seconds to allow initial setup)
-  setTimeout(() => {
-    heartbeat.start();
-  }, 5000);
 });
 
 mqttClient.on('message', async (topic, message) => {
@@ -1652,14 +1391,6 @@ mqttClient.on('message', async (topic, message) => {
         return;
       }
       
-      if (payload.action === 'setHeartbeatInterval') {
-        heartbeat.timeout = payload.interval || 30;
-        heartbeat.stop();
-        heartbeat.start();
-        log(`💓 Heartbeat interval updated: ${heartbeat.timeout}s`, 'info');
-        return;
-      }
-      
       if (state.moduleId) {
         await executeCommand(payload.action, payload.params);
       }
@@ -1684,13 +1415,23 @@ mqttClient.on('error', (error) => {
 });
 
 // ============================================
-// SHUTDOWN & ERROR HANDLING
+// INITIALIZATION
 // ============================================
+async function requestModuleId() {
+  try {
+    await axios.post(`${CONFIG.local.baseUrl}/system/serial/getModuleId`, {}, {
+      timeout: 5000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    log(`Module ID request failed: ${error.message}`, 'error');
+  }
+}
+
 function gracefulShutdown() {
   console.log('\n⏹️ Shutting down...\n');
   
   stopQRScanner();
-  heartbeat.stop();
   
   if (state.compactorTimer) {
     clearTimeout(state.compactorTimer);
@@ -1703,11 +1444,7 @@ function gracefulShutdown() {
   clearSessionTimers();
   
   if (state.globalKeyListener) {
-    try {
-      state.globalKeyListener.kill();
-    } catch (e) {
-      // Ignore
-    }
+    state.globalKeyListener.kill();
   }
   
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
@@ -1716,13 +1453,7 @@ function gracefulShutdown() {
     timestamp: new Date().toISOString()
   }), { retain: true });
   
-  if (state.ws) {
-    try {
-      state.ws.close();
-    } catch (e) {
-      // Ignore
-    }
-  }
+  if (state.ws) state.ws.close();
   
   setTimeout(() => {
     mqttClient.end();
@@ -1749,17 +1480,50 @@ process.on('unhandledRejection', (error) => {
 // STARTUP SEQUENCE
 // ============================================
 console.log('='.repeat(60));
-console.log('🚀 RVM AGENT - QR SCANNER + MQTT HEARTBEAT');
+console.log('🚀 RVM AGENT - QR SCANNER + GUEST SUPPORT');
 console.log('='.repeat(60));
 console.log(`📱 Device: ${CONFIG.device.id}`);
 console.log('✅ Member: QR code scan → Track user + points');
 console.log('✅ Guest: Button click → Track session + points');
 console.log('✅ Background QR scanning enabled');
 console.log('✅ No window focus needed!');
-console.log('💓 MQTT heartbeat: Every 30 seconds');
-console.log('🔄 Auto-reconnect on connection loss');
-console.log('📡 Reliable module ID acquisition with retries');
 console.log('='.repeat(60) + '\n');
 
-log('🚀 Agent starting...', 'info');
-log('Waiting for MQTT and WebSocket connections...', 'info');
+setTimeout(() => {
+  if (state.moduleId) {
+    log('Module ID received, initializing system...', 'info');
+    
+    state.isReady = true;
+    
+    setupSimpleQRScanner();
+    
+    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+      deviceId: CONFIG.device.id,
+      status: 'ready',
+      event: 'startup_ready',
+      isReady: true,
+      qrScannerActive: state.qrScannerActive,
+      timestamp: new Date().toISOString()
+    }));
+    
+    mqttClient.publish(CONFIG.mqtt.topics.screenState, JSON.stringify({
+      deviceId: CONFIG.device.id,
+      state: 'ready_for_qr',
+      message: 'Please scan your QR code or click Start Recycling',
+      timestamp: new Date().toISOString()
+    }));
+    
+    console.log('\n🟢 SYSTEM READY');
+    console.log('📱 QR Scanner: Active');
+    console.log('🎫 Guest Button: Ready');
+    console.log('💡 Both member and guest will receive points!\n');
+    
+    setTimeout(() => {
+      runDiagnostics();
+    }, 2000);
+    
+  } else {
+    log('Module ID not received, retrying...', 'warning');
+    requestModuleId();
+  }
+}, 3000);
