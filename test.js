@@ -1297,6 +1297,8 @@ async function handleSessionTimeout(reason) {
   await resetSystemForNextUser(false);
 }
 
+
+
 function resetInactivityTimer() {
   if (state.sessionTimeoutTimer) {
     clearTimeout(state.sessionTimeoutTimer);
