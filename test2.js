@@ -1551,13 +1551,22 @@ mqttClient.on('connect', () => {
   mqttClient.subscribe(CONFIG.mqtt.topics.qrInput);
   mqttClient.subscribe(CONFIG.mqtt.topics.guestStart);
   
-  // CRITICAL: Publish online status with device_connected event
+  // CRITICAL: Publish online status
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
     status: 'online',
     event: 'device_connected',
     timestamp: new Date().toISOString()
   }), { retain: true });
+  
+  // IMMEDIATELY send startup_ready (backend needs this!)
+  mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+    deviceId: CONFIG.device.id,
+    status: 'ready',
+    event: 'startup_ready',
+    isReady: true,
+    timestamp: new Date().toISOString()
+  }));
   
   connectWebSocket();
   
