@@ -640,6 +640,7 @@ const heartbeat = {
           mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
             deviceId: CONFIG.device.id,
             status: 'ready',
+            event: 'startup_ready',
             moduleId: state.moduleId,
             isReady: true,
             timestamp
@@ -1267,14 +1268,13 @@ async function resetSystemForNextUser(forceStop = false) {
     console.log('✅ READY FOR NEXT USER');
     console.log('='.repeat(50) + '\n');
     
-    // CRITICAL: Notify backend that session ended and device is ready
+    // CRITICAL: Notify backend device is ready (backend handles reset_complete)
     mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
       deviceId: CONFIG.device.id,
       status: 'ready',
-      event: 'session_ended',
+      event: 'reset_complete',
       isReady: true,
       autoCycleEnabled: false,
-      sessionEnded: true,
       timestamp: new Date().toISOString()
     }));
     
@@ -1551,9 +1551,11 @@ mqttClient.on('connect', () => {
   mqttClient.subscribe(CONFIG.mqtt.topics.qrInput);
   mqttClient.subscribe(CONFIG.mqtt.topics.guestStart);
   
+  // CRITICAL: Publish online status with device_connected event
   mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
     deviceId: CONFIG.device.id,
     status: 'online',
+    event: 'device_connected',
     timestamp: new Date().toISOString()
   }), { retain: true });
   
@@ -1582,6 +1584,25 @@ mqttClient.on('message', async (topic, message) => {
     }
     
     if (topic === CONFIG.mqtt.topics.commands) {
+      if (payload.action === 'getStatus') {
+        // Backend requesting device status
+        log('📊 Status request received', 'info');
+        
+        mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+          deviceId: CONFIG.device.id,
+          status: state.isReady ? 'ready' : 'initializing',
+          event: 'status_response',
+          isReady: state.isReady,
+          autoCycleEnabled: state.autoCycleEnabled,
+          resetting: state.resetting,
+          processingQR: state.processingQR,
+          moduleId: state.moduleId,
+          timestamp: new Date().toISOString()
+        }));
+        
+        return;
+      }
+      
       if (payload.action === 'emergencyStop') {
         await executeCommand('closeGate');
         await executeCommand('customMotor', CONFIG.motors.belt.stop);
