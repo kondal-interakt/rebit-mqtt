@@ -1065,6 +1065,18 @@ async function startMemberSession(validationData) {
       timestamp: new Date().toISOString()
     }));
     
+    // CRITICAL: Notify backend that session started
+    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+      deviceId: CONFIG.device.id,
+      status: 'session_active',
+      event: 'session_started',
+      sessionType: 'member',
+      userId: state.currentUserId,
+      sessionId: state.sessionId,
+      sessionCode: state.sessionCode,
+      timestamp: new Date().toISOString()
+    }));
+    
     if (state.autoPhotoTimer) {
       clearTimeout(state.autoPhotoTimer);
     }
@@ -1130,6 +1142,17 @@ async function startGuestSession(sessionData) {
       state: 'session_active',
       message: 'Insert your items',
       sessionType: 'guest',
+      timestamp: new Date().toISOString()
+    }));
+    
+    // CRITICAL: Notify backend that session started
+    mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
+      deviceId: CONFIG.device.id,
+      status: 'session_active',
+      event: 'session_started',
+      sessionType: 'guest',
+      sessionId: state.sessionId,
+      sessionCode: state.sessionCode,
       timestamp: new Date().toISOString()
     }));
     
@@ -1244,10 +1267,14 @@ async function resetSystemForNextUser(forceStop = false) {
     console.log('✅ READY FOR NEXT USER');
     console.log('='.repeat(50) + '\n');
     
+    // CRITICAL: Notify backend that session ended and device is ready
     mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
       deviceId: CONFIG.device.id,
       status: 'ready',
+      event: 'session_ended',
       isReady: true,
+      autoCycleEnabled: false,
+      sessionEnded: true,
       timestamp: new Date().toISOString()
     }));
     
@@ -1279,11 +1306,16 @@ async function handleSessionTimeout(reason) {
   
   try {
     if (state.sessionCode && state.itemsProcessed > 0) {
+      // Notify backend of timeout
       mqttClient.publish(CONFIG.mqtt.topics.status, JSON.stringify({
         deviceId: CONFIG.device.id,
         status: 'session_timeout',
+        event: 'session_timeout',
         reason: reason,
         sessionCode: state.sessionCode,
+        userId: state.currentUserId,
+        itemsProcessed: state.itemsProcessed,
+        sessionType: state.isMember ? 'member' : 'guest',
         timestamp: new Date().toISOString()
       }));
       
